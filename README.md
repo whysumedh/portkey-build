@@ -5,6 +5,7 @@ A production-grade platform for AI agent developers to analyze performance and r
 ## Overview
 
 This platform helps agent developers who:
+
 - Own multiple AI agents
 - Iterate on prompts, tools, and models
 - Want to optimize cost, quality, refusal rate, and stability
@@ -51,27 +52,32 @@ This platform helps agent developers who:
 ## Key Features
 
 ### 1. Log Ingestion
+
 - Sync production logs from Portkey observability
 - Immutable, versioned log storage
 - Privacy mode (option to hash prompts)
 
 ### 2. Analytics Engine
+
 - Safe, structured analysis requests (no arbitrary code execution)
 - Supports: distributions, percentiles, correlations, aggregations, clustering, sampling
 - Deterministic, cached, budget-limited
 
 ### 3. Model Selector
+
 - Deterministic pruning rules first
 - AI-assisted ranking
 - Outputs structured JSON with explanations
 - Never sees raw logs
 
 ### 4. Replay Engine
+
 - Replays historical prompts deterministically
 - Executes candidate models via Portkey
 - Tracks tokens, latency, cost, errors
 
 ### 5. Evaluation Engine
+
 - Multiple specialized AI judges:
   - Correctness Judge
   - Safety Judge
@@ -81,26 +87,28 @@ This platform helps agent developers who:
 - Versioned prompts for reproducibility
 
 ### 6. Recommendation Engine
+
 - Confidence-gated recommendations
 - "NO RECOMMENDATION" when uncertain
 - Full trade-off analysis
 - Explainable reasoning
 
 ### 7. Drift Detection
+
 - Monitors performance over time windows
 - Alerts on degradation
 - Actionable recommendations
 
 ## Tech Stack
 
-| Component | Technology |
-|-----------|------------|
-| Backend | Python 3.11+, FastAPI, SQLAlchemy, Alembic |
-| Analytics | Pandas, NumPy, SciPy |
-| Database | PostgreSQL 15+ |
-| Task Queue | APScheduler |
-| Frontend | React 18, TypeScript, TailwindCSS, Recharts |
-| LLM Integration | Portkey Python SDK |
+| Component       | Technology                                  |
+| --------------- | ------------------------------------------- |
+| Backend         | Python 3.11+, FastAPI, SQLAlchemy, Alembic  |
+| Analytics       | Pandas, NumPy, SciPy                        |
+| Database        | PostgreSQL 15+                              |
+| Task Queue      | APScheduler                                 |
+| Frontend        | React 18, TypeScript, TailwindCSS, Recharts |
+| LLM Integration | Portkey Python SDK                          |
 
 ## Quick Start
 
@@ -155,31 +163,37 @@ npm run dev
 ## API Endpoints
 
 ### Projects
+
 - `GET /api/v1/projects` - List projects
 - `POST /api/v1/projects` - Create project
 - `GET /api/v1/projects/{id}` - Get project
 - `PATCH /api/v1/projects/{id}` - Update project
 
 ### Logs
+
 - `POST /api/v1/logs/{project_id}/sync` - Sync logs from Portkey
 - `GET /api/v1/logs/{project_id}/stats` - Get log statistics
 - `GET /api/v1/logs/{project_id}` - List logs
 
 ### Analytics
+
 - `POST /api/v1/analytics` - Run analysis
 - `GET /api/v1/analytics/{project_id}/summary` - Get summary statistics
 
 ### Evaluations
+
 - `POST /api/v1/evaluations` - Create evaluation run
 - `GET /api/v1/evaluations/{project_id}` - List evaluations
 - `GET /api/v1/evaluations/{project_id}/{id}` - Get evaluation details
 
 ### Recommendations
+
 - `POST /api/v1/recommendations/{project_id}/generate` - Generate recommendation
 - `GET /api/v1/recommendations/{project_id}/latest` - Get latest recommendation
 - `POST /api/v1/recommendations/{project_id}/{id}/acknowledge` - Acknowledge recommendation
 
 ### Scheduler
+
 - `GET /api/v1/scheduler/status` - Get scheduler status
 - `POST /api/v1/scheduler/trigger` - Trigger ad-hoc evaluation
 
@@ -250,3 +264,5 @@ portkey-build/
 ## License
 
 MIT
+
+push test
