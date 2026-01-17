@@ -4,12 +4,14 @@ import {
   Folder, 
   Sparkles,
   Settings,
-  ChevronRight
+  ChevronRight,
+  ScrollText
 } from 'lucide-react'
 import clsx from 'clsx'
 
 const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { path: '/logs', label: 'Portkey Logs', icon: ScrollText },
   { path: '/projects', label: 'Projects', icon: Folder },
 ]
 

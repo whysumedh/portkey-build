@@ -6,6 +6,7 @@ import ProjectDetail from './pages/ProjectDetail'
 import ProjectCreate from './pages/ProjectCreate'
 import Recommendations from './pages/Recommendations'
 import Analytics from './pages/Analytics'
+import PortkeyLogs from './pages/PortkeyLogs'
 
 function App() {
   return (
@@ -14,6 +15,7 @@ function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<Dashboard />} />
+          <Route path="logs" element={<PortkeyLogs />} />
           <Route path="projects" element={<ProjectList />} />
           <Route path="projects/new" element={<ProjectCreate />} />
           <Route path="projects/:id" element={<ProjectDetail />} />

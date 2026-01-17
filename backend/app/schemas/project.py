@@ -59,6 +59,10 @@ class ProjectCreate(BaseModel):
     portkey_config_id: str | None = None
     current_model: str | None = None
     current_provider: str | None = None
+    # Selected Portkey log IDs to associate with this project
+    selected_log_ids: list[str] | None = Field(default=None, description="Portkey log IDs to associate with this project")
+    # Optional metadata filter for automatic log association
+    log_filter_metadata: dict[str, str] | None = Field(default=None, description="Metadata key-value pairs for filtering logs")
     success_criteria: SuccessCriteriaCreate | None = None
     tolerance_levels: ToleranceLevelsCreate | None = None
 
@@ -73,6 +77,8 @@ class ProjectUpdate(BaseModel):
     current_model: str | None = None
     current_provider: str | None = None
     is_active: bool | None = None
+    selected_log_ids: list[str] | None = None
+    log_filter_metadata: dict[str, str] | None = None
     success_criteria: SuccessCriteriaCreate | None = None
     tolerance_levels: ToleranceLevelsCreate | None = None
 
@@ -89,6 +95,8 @@ class ProjectResponse(BaseModel):
     portkey_config_id: str | None
     current_model: str | None
     current_provider: str | None
+    selected_log_ids: list[str] | None
+    log_filter_metadata: dict[str, str] | None
     is_active: bool
     last_log_sync: datetime | None
     last_evaluation: datetime | None

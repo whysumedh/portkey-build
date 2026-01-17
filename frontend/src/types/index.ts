@@ -37,6 +37,8 @@ export interface Project {
   portkey_config_id?: string
   current_model?: string
   current_provider?: string
+  selected_log_ids?: string[]
+  log_filter_metadata?: Record<string, string>
   is_active: boolean
   last_log_sync?: string
   last_evaluation?: string

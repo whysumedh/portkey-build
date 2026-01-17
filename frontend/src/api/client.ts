@@ -62,6 +62,94 @@ export const logsApi = {
   },
 }
 
+// Portkey Direct Logs
+export interface PortkeyLog {
+  id: string
+  trace_id?: string
+  request_id?: string
+  span_id?: string
+  created_at?: string
+  time_of_generation?: string
+  // Model info - Portkey uses ai_org for provider
+  ai_model?: string
+  ai_org?: string  // This is the provider
+  ai_provider?: string  // Alias
+  mode?: string
+  config?: string
+  prompt_slug?: string
+  // Tokens - Portkey uses "units" terminology
+  req_units?: number  // prompt tokens
+  res_units?: number  // completion tokens
+  total_units?: number  // total tokens
+  prompt_tokens?: number  // Alias
+  completion_tokens?: number  // Alias
+  total_tokens?: number  // Alias
+  // Cost and performance
+  cost?: number
+  cost_currency?: string
+  response_time?: number
+  response_status_code?: number
+  request_url?: string
+  // Status
+  status?: string
+  is_success?: boolean
+  // Request/Response bodies
+  request?: Record<string, unknown>
+  response?: Record<string, unknown>
+  metadata?: Record<string, unknown>
+}
+
+export interface PortkeyLogsResponse {
+  logs: PortkeyLog[]
+  total: number
+  from_cache: boolean
+  last_synced?: string
+}
+
+export const portkeyLogsApi = {
+  getLogs: async (options?: { 
+    workspace_id?: string
+    hours?: number
+    limit?: number
+    refresh?: boolean  // Pass true to fetch new logs from Portkey
+  }) => {
+    const params = new URLSearchParams()
+    if (options?.workspace_id) params.set('workspace_id', options.workspace_id)
+    if (options?.hours) params.set('hours', String(options.hours))
+    if (options?.limit) params.set('limit', String(options.limit))
+    if (options?.refresh) params.set('refresh', 'true')
+    
+    const { data } = await api.get<PortkeyLogsResponse>(`/logs/portkey/logs?${params}`)
+    return data
+  },
+  
+  getLogById: async (logId: string) => {
+    const { data } = await api.get<PortkeyLog>(`/logs/portkey/logs/${logId}`)
+    return data
+  },
+  
+  listExports: async (workspaceId?: string, limit = 20) => {
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (workspaceId) params.set('workspace_id', workspaceId)
+    const { data } = await api.get(`/logs/portkey/exports?${params}`)
+    return data
+  },
+  
+  createExport: async (options?: { workspace_id?: string; start_date?: string; end_date?: string }) => {
+    const params = new URLSearchParams()
+    if (options?.workspace_id) params.set('workspace_id', options.workspace_id)
+    if (options?.start_date) params.set('start_date', options.start_date)
+    if (options?.end_date) params.set('end_date', options.end_date)
+    const { data } = await api.post(`/logs/portkey/exports/create?${params}`)
+    return data
+  },
+  
+  getExportStatus: async (exportId: string) => {
+    const { data } = await api.get(`/logs/portkey/exports/${exportId}/status`)
+    return data
+  },
+}
+
 // Analytics
 export const analyticsApi = {
   getSummary: async (projectId: string) => {

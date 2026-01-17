@@ -120,6 +120,12 @@ class Project(Base):
     portkey_virtual_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     portkey_config_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     
+    # Selected Portkey log IDs (from log exports)
+    selected_log_ids: Mapped[list | None] = mapped_column(JSON, nullable=True, default=list)
+    
+    # Log filter criteria (for automatic log association)
+    log_filter_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
     # Current model configuration
     current_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     current_provider: Mapped[str | None] = mapped_column(String(255), nullable=True)

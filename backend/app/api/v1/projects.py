@@ -17,6 +17,7 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectListResponse,
 )
+from app.services.ingestion.log_ingestion import LogIngestionService
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -31,6 +32,8 @@ async def create_project(
     Create a new project for an AI agent.
     
     A project represents exactly ONE AI agent being optimized.
+    If selected_log_ids is provided, those logs will be imported from Portkey
+    and associated with this project.
     """
     logger.info("Creating project", name=project_data.name)
     
@@ -43,6 +46,8 @@ async def create_project(
         portkey_config_id=project_data.portkey_config_id,
         current_model=project_data.current_model,
         current_provider=project_data.current_provider,
+        selected_log_ids=project_data.selected_log_ids,
+        log_filter_metadata=project_data.log_filter_metadata,
     )
     db.add(project)
     await db.flush()  # Get the project ID
@@ -72,6 +77,28 @@ async def create_project(
         db.add(tolerances)
     
     await db.commit()
+    
+    # Import selected logs from Portkey if provided
+    import_stats = None
+    if project_data.selected_log_ids:
+        logger.info(
+            "Importing selected logs",
+            project_id=str(project.id),
+            log_count=len(project_data.selected_log_ids),
+        )
+        ingestion_service = LogIngestionService(db)
+        import_stats = await ingestion_service.import_logs_by_ids(
+            project_id=project.id,
+            log_ids=project_data.selected_log_ids,
+        )
+        await db.commit()
+        logger.info(
+            "Logs imported",
+            project_id=str(project.id),
+            imported=import_stats.get("imported", 0),
+            skipped=import_stats.get("skipped", 0),
+        )
+    
     await db.refresh(project)
     
     # Load relationships

@@ -277,7 +277,7 @@ class LogIngestionService:
             cache_status=portkey_data.get("cache_status"),
             retry_count=portkey_data.get("retry_count", 0),
             fallback_used=portkey_data.get("fallback_used", False),
-            metadata=portkey_data.get("metadata"),
+            log_metadata=portkey_data.get("metadata"),
         )
 
     async def get_log_stats(self, project_id: uuid.UUID) -> dict[str, Any]:
@@ -342,3 +342,210 @@ class LogIngestionService:
             "refusal_rate": refused_count / total if total > 0 else 0,
             "error_rate": error_count / total if total > 0 else 0,
         }
+
+    async def import_logs_by_ids(
+        self,
+        project_id: uuid.UUID,
+        log_ids: list[str],
+        include_prompt: bool = True,
+    ) -> dict[str, Any]:
+        """
+        Import specific logs from Portkey by their IDs.
+        
+        This fetches logs via the export API and stores them in the database.
+        Used when associating existing Portkey logs with a new project.
+        
+        Args:
+            project_id: The project ID to associate logs with
+            log_ids: List of Portkey log IDs to import
+            include_prompt: Whether to store raw prompts
+            
+        Returns:
+            Import statistics
+        """
+        logger.info(
+            "Importing logs by ID",
+            project_id=str(project_id),
+            log_count=len(log_ids),
+        )
+        
+        import_stats = {
+            "project_id": project_id,
+            "requested": len(log_ids),
+            "imported": 0,
+            "skipped": 0,
+            "errors": [],
+        }
+        
+        if not log_ids:
+            return import_stats
+        
+        try:
+            # Fetch all logs from Portkey
+            all_logs = await self.portkey.get_logs(hours=168)  # Last 7 days
+            
+            # Filter to only the requested log IDs
+            logs_to_import = [
+                log for log in all_logs
+                if log.get("id") in log_ids or log.get("log_id") in log_ids
+            ]
+            
+            logger.info(
+                "Found logs to import",
+                requested=len(log_ids),
+                found=len(logs_to_import),
+            )
+            
+            # Get existing log IDs to avoid duplicates
+            existing_ids = await self._get_existing_log_ids(
+                project_id,
+                [log.get("id", log.get("log_id", "")) for log in logs_to_import],
+            )
+            
+            # Process logs
+            for log_data in logs_to_import:
+                log_id = log_data.get("id") or log_data.get("log_id", "")
+                
+                if log_id in existing_ids:
+                    import_stats["skipped"] += 1
+                    continue
+                
+                try:
+                    log_entry = self._convert_portkey_export_log(
+                        project_id=project_id,
+                        portkey_data=log_data,
+                        include_prompt=include_prompt,
+                    )
+                    self.session.add(log_entry)
+                    import_stats["imported"] += 1
+                    existing_ids.add(log_id)
+                    
+                except Exception as e:
+                    logger.warning(
+                        "Failed to import log",
+                        log_id=log_id,
+                        error=str(e),
+                    )
+                    import_stats["errors"].append(f"{log_id}: {str(e)}")
+                    import_stats["skipped"] += 1
+            
+            await self.session.flush()
+            
+            logger.info(
+                "Log import completed",
+                project_id=str(project_id),
+                imported=import_stats["imported"],
+                skipped=import_stats["skipped"],
+            )
+            
+        except Exception as e:
+            logger.error(
+                "Log import failed",
+                project_id=str(project_id),
+                error=str(e),
+            )
+            import_stats["errors"].append(str(e))
+        
+        return import_stats
+
+    def _convert_portkey_export_log(
+        self,
+        project_id: uuid.UUID,
+        portkey_data: dict[str, Any],
+        include_prompt: bool,
+    ) -> LogEntry:
+        """
+        Convert Portkey export format log data to LogEntry model.
+        
+        Export format uses different field names:
+        - ai_model instead of model
+        - ai_org instead of provider
+        - req_units, res_units, total_units instead of usage.prompt_tokens etc.
+        - time_of_generation instead of created_at
+        - response_time instead of latency_ms
+        - is_success instead of status
+        """
+        # Get log ID
+        log_id = portkey_data.get("id") or portkey_data.get("log_id") or str(uuid.uuid4())
+        
+        # Parse timestamp (handle multiple possible formats)
+        time_str = portkey_data.get("time_of_generation") or portkey_data.get("created_at")
+        if isinstance(time_str, str):
+            try:
+                timestamp = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            except ValueError:
+                timestamp = datetime.now(timezone.utc)
+        else:
+            timestamp = datetime.now(timezone.utc)
+        
+        # Get model and provider (export format uses ai_model, ai_org)
+        model = portkey_data.get("ai_model") or portkey_data.get("model") or "unknown"
+        provider = portkey_data.get("ai_org") or portkey_data.get("ai_provider") or portkey_data.get("provider") or "unknown"
+        
+        # Get tokens (export format uses req_units, res_units, total_units)
+        input_tokens = portkey_data.get("req_units") or portkey_data.get("usage", {}).get("prompt_tokens", 0) or 0
+        output_tokens = portkey_data.get("res_units") or portkey_data.get("usage", {}).get("completion_tokens", 0) or 0
+        total_tokens = portkey_data.get("total_units") or portkey_data.get("usage", {}).get("total_tokens", 0) or 0
+        
+        # Get latency
+        latency = portkey_data.get("response_time") or portkey_data.get("latency_ms") or 0
+        
+        # Determine status
+        is_success = portkey_data.get("is_success")
+        if is_success is True:
+            status = "success"
+        elif is_success is False:
+            status = "error"
+        elif portkey_data.get("error"):
+            status = "error"
+        elif portkey_data.get("refusal"):
+            status = "refused"
+        else:
+            status = portkey_data.get("status", "success")
+        
+        # Get cost
+        cost = portkey_data.get("cost") or 0.0
+        
+        # Extract prompt data
+        prompt_str = ""
+        system_prompt = None
+        messages = portkey_data.get("request", {}).get("messages", [])
+        
+        if messages:
+            for msg in messages:
+                if msg.get("role") == "system":
+                    system_prompt = msg.get("content", "")
+                elif msg.get("role") == "user":
+                    prompt_str = msg.get("content", "")
+        elif portkey_data.get("prompt"):
+            prompt_str = str(portkey_data.get("prompt"))
+        
+        return LogEntry(
+            id=uuid.uuid4(),
+            project_id=project_id,
+            portkey_log_id=log_id,
+            trace_id=portkey_data.get("trace_id"),
+            span_id=portkey_data.get("span_id"),
+            timestamp=timestamp,
+            endpoint=portkey_data.get("endpoint", "/chat/completions"),
+            prompt=prompt_str if include_prompt else None,
+            prompt_hash=LogEntry.compute_hash(prompt_str),
+            system_prompt=system_prompt if include_prompt else None,
+            context=portkey_data.get("context"),
+            tool_calls=portkey_data.get("request", {}).get("tools"),
+            model=model,
+            provider=provider,
+            input_tokens=int(input_tokens),
+            output_tokens=int(output_tokens),
+            total_tokens=int(total_tokens),
+            latency_ms=float(latency),
+            cost_usd=float(cost),
+            status=status,
+            error_message=portkey_data.get("error", {}).get("message") if isinstance(portkey_data.get("error"), dict) else None,
+            error_code=portkey_data.get("error", {}).get("code") if isinstance(portkey_data.get("error"), dict) else None,
+            refusal=bool(portkey_data.get("refusal", False)),
+            cache_status=portkey_data.get("cache_status"),
+            retry_count=int(portkey_data.get("retry_count", 0)),
+            fallback_used=bool(portkey_data.get("fallback_used", False)),
+            log_metadata=portkey_data.get("metadata"),
+        )

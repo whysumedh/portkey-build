@@ -54,8 +54,10 @@ class LogEntry(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    # project_id is nullable to allow storing workspace-level logs (log pool)
+    # Logs without a project_id are in the "pool" and can be assigned to projects later
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
     )
 
     # Portkey identifiers
@@ -104,7 +106,7 @@ class LogEntry(Base):
     fallback_used: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Custom metadata from Portkey
-    metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    log_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Versioning
     schema_version: Mapped[int] = mapped_column(Integer, default=1)
@@ -112,8 +114,8 @@ class LogEntry(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
-    # Relationships
-    project: Mapped["Project"] = relationship("Project", back_populates="log_entries")
+    # Relationships (project is optional for workspace-level logs)
+    project: Mapped["Project | None"] = relationship("Project", back_populates="log_entries")
 
     @staticmethod
     def compute_hash(content: str) -> str:
@@ -154,7 +156,7 @@ class LogEntry(Base):
             cache_status=portkey_data.get("cache_status"),
             retry_count=portkey_data.get("retry_count", 0),
             fallback_used=portkey_data.get("fallback_used", False),
-            metadata=portkey_data.get("metadata"),
+            log_metadata=portkey_data.get("metadata"),
         )
 
     def __repr__(self) -> str:
