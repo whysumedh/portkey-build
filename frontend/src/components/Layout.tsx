@@ -32,8 +32,8 @@ export default function Layout() {
               <Sparkles className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="font-display font-semibold text-void-50">Agent Optimizer</h1>
-              <p className="text-xs text-void-400">Model Selection Platform</p>
+              <h1 className="font-display font-semibold text-void-50">Clot</h1>
+              <p className="text-xs text-void-400">Stop Bleeding Your Money</p>
             </div>
           </div>
         </div>
