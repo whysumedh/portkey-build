@@ -80,6 +80,10 @@ class LogEntry(Base):
     context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     tool_calls: Mapped[list | None] = mapped_column(JSON, nullable=True)
     
+    # Full request/response data from Portkey (for detailed view)
+    request_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    response_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    
     # Response data (completion not stored for deterministic replay)
     completion_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
@@ -118,9 +122,29 @@ class LogEntry(Base):
     project: Mapped["Project | None"] = relationship("Project", back_populates="log_entries")
 
     @staticmethod
-    def compute_hash(content: str) -> str:
-        """Compute SHA-256 hash of content."""
-        return hashlib.sha256(content.encode()).hexdigest()
+    def compute_hash(content: str | list | dict | None) -> str:
+        """
+        Compute SHA-256 hash of content.
+        
+        Handles various content types:
+        - str: hashes directly
+        - list: converts to JSON string (for multi-modal messages)
+        - dict: converts to JSON string
+        - None: returns hash of empty string
+        """
+        import json
+        
+        if content is None:
+            content_str = ""
+        elif isinstance(content, str):
+            content_str = content
+        elif isinstance(content, (list, dict)):
+            # Handle multi-modal content (list of content parts) or dict
+            content_str = json.dumps(content, sort_keys=True, default=str)
+        else:
+            content_str = str(content)
+        
+        return hashlib.sha256(content_str.encode()).hexdigest()
 
     @classmethod
     def from_portkey_log(cls, project_id: uuid.UUID, portkey_data: dict) -> "LogEntry":

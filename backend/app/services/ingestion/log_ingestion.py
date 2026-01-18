@@ -16,6 +16,158 @@ from app.services.ingestion.portkey_client import PortkeyClient, get_portkey_cli
 logger = get_logger(__name__)
 
 
+# Model pricing per million tokens (USD)
+# Updated pricing as of 2026 - prices in $ per 1M tokens
+MODEL_PRICING = {
+    # OpenAI models
+    "gpt-4o": {"input": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-4-turbo": {"input": 10.00, "output": 30.00},
+    "gpt-4": {"input": 30.00, "output": 60.00},
+    "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
+    "o1": {"input": 15.00, "output": 60.00},
+    "o1-mini": {"input": 3.00, "output": 12.00},
+    "o4-mini": {"input": 1.10, "output": 4.40},
+    "o4-mini-deep-research": {"input": 1.10, "output": 4.40},
+    # Anthropic models
+    "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
+    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
+    "claude-3-opus": {"input": 15.00, "output": 75.00},
+    "claude-3-sonnet": {"input": 3.00, "output": 15.00},
+    "claude-3-haiku": {"input": 0.25, "output": 1.25},
+    "claude-opus-4-5": {"input": 15.00, "output": 75.00},  # Claude Opus 4.5
+    "claude-opus-4-5-20251101": {"input": 15.00, "output": 75.00},
+    # Google models
+    "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+    "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+}
+
+# Default pricing for unknown models (conservative estimate)
+DEFAULT_PRICING = {"input": 5.00, "output": 15.00}
+
+
+def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """
+    Calculate cost based on model pricing and token counts.
+    
+    Args:
+        model: Model name/identifier
+        input_tokens: Number of input tokens
+        output_tokens: Number of output tokens
+        
+    Returns:
+        Cost in USD
+    """
+    # Find pricing for this model (check for partial matches)
+    pricing = None
+    model_lower = model.lower()
+    
+    for model_key, model_pricing in MODEL_PRICING.items():
+        if model_key.lower() in model_lower or model_lower in model_key.lower():
+            pricing = model_pricing
+            break
+    
+    if pricing is None:
+        pricing = DEFAULT_PRICING
+        logger.debug(f"Using default pricing for unknown model: {model}")
+    
+    # Calculate cost (pricing is per million tokens)
+    input_cost = (input_tokens / 1_000_000) * pricing["input"]
+    output_cost = (output_tokens / 1_000_000) * pricing["output"]
+    
+    return input_cost + output_cost
+
+
+def parse_portkey_timestamp(time_str: str | None) -> datetime:
+    """
+    Parse timestamp from Portkey API.
+    
+    Portkey returns timestamps in JavaScript Date format:
+    "Sat Jan 17 2026 06:20:43 GMT+0000 (Coordinated Universal Time)"
+    
+    This function handles multiple formats:
+    - JavaScript Date format (e.g., "Sat Jan 17 2026 06:20:43 GMT+0000 (Coordinated Universal Time)")
+    - ISO format (e.g., "2026-01-17T06:20:43Z" or "2026-01-17T06:20:43+00:00")
+    - Unix timestamp (milliseconds or seconds)
+    
+    Args:
+        time_str: Timestamp string from Portkey
+        
+    Returns:
+        Parsed datetime in UTC, or current UTC time if parsing fails
+    """
+    if not time_str:
+        return datetime.now(timezone.utc)
+    
+    # Handle integer timestamps (Unix epoch)
+    if isinstance(time_str, (int, float)):
+        try:
+            # Check if milliseconds (> year 2100 in seconds)
+            if time_str > 4102444800:
+                time_str = time_str / 1000
+            return datetime.fromtimestamp(time_str, tz=timezone.utc)
+        except (ValueError, OSError):
+            return datetime.now(timezone.utc)
+    
+    time_str = str(time_str).strip()
+    
+    # Try ISO format first (most efficient)
+    try:
+        return datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    
+    # Try JavaScript Date format: "Sat Jan 17 2026 06:20:43 GMT+0000 (Coordinated Universal Time)"
+    # Extract the core part before any parenthetical timezone name
+    js_date_str = time_str.split("(")[0].strip()
+    
+    # Try parsing without day name
+    js_formats = [
+        "%a %b %d %Y %H:%M:%S GMT%z",  # "Sat Jan 17 2026 06:20:43 GMT+0000"
+        "%b %d %Y %H:%M:%S GMT%z",     # "Jan 17 2026 06:20:43 GMT+0000"
+        "%a %b %d %Y %H:%M:%S %Z",     # With timezone name
+        "%Y-%m-%d %H:%M:%S",           # Simple format
+        "%Y-%m-%dT%H:%M:%S",           # ISO without timezone
+    ]
+    
+    for fmt in js_formats:
+        try:
+            parsed = datetime.strptime(js_date_str, fmt)
+            # Ensure timezone aware
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except ValueError:
+            continue
+    
+    # Last resort: try to extract date/time components manually
+    # Pattern: "... Jan 17 2026 06:20:43 ..."
+    import re
+    match = re.search(
+        r'(\w{3})\s+(\d{1,2})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})',
+        time_str
+    )
+    if match:
+        month_map = {
+            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+        }
+        month_str, day, year, hour, minute, second = match.groups()
+        month = month_map.get(month_str, 1)
+        try:
+            return datetime(
+                int(year), month, int(day),
+                int(hour), int(minute), int(second),
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            pass
+    
+    logger.warning(f"Failed to parse timestamp: {time_str}, using current time")
+    return datetime.now(timezone.utc)
+
+
 class LogIngestionError(Exception):
     """Error during log ingestion."""
     pass
@@ -215,23 +367,35 @@ class LogIngestionService:
         include_prompt: bool,
     ) -> LogEntry:
         """Convert Portkey log data to LogEntry model."""
-        # Extract prompt from messages
+        # Extract prompt from messages (handle multi-modal content)
         messages = portkey_data.get("request", {}).get("messages", [])
         prompt_str = ""
         system_prompt = None
         
         for msg in messages:
+            content = msg.get("content", "")
+            # Handle multi-modal content (list of content parts)
+            if isinstance(content, list):
+                text_parts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                content_str = "\n".join(text_parts) if text_parts else str(content)
+            elif isinstance(content, str):
+                content_str = content
+            else:
+                content_str = str(content) if content else ""
+            
             if msg.get("role") == "system":
-                system_prompt = msg.get("content", "")
+                system_prompt = content_str
             elif msg.get("role") == "user":
-                prompt_str = msg.get("content", "")
+                prompt_str = content_str
 
-        # Parse timestamp
-        created_at = portkey_data.get("created_at")
-        if isinstance(created_at, str):
-            timestamp = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        else:
-            timestamp = datetime.now(timezone.utc)
+        # Parse timestamp using robust parser that handles multiple formats
+        created_at = portkey_data.get("created_at") or portkey_data.get("time_of_generation")
+        timestamp = parse_portkey_timestamp(created_at)
 
         # Determine status
         status = "success"
@@ -240,15 +404,15 @@ class LogIngestionService:
         elif portkey_data.get("refusal"):
             status = "refused"
 
-        # Calculate cost if not provided
-        cost = portkey_data.get("cost", 0.0)
-        if cost == 0:
-            # Estimate based on tokens (rough estimate)
-            usage = portkey_data.get("usage", {})
-            input_tokens = usage.get("prompt_tokens", 0)
-            output_tokens = usage.get("completion_tokens", 0)
-            # Very rough estimate: $0.001 per 1K tokens
-            cost = (input_tokens + output_tokens) * 0.000001
+        # Get token counts
+        usage = portkey_data.get("usage", {})
+        input_tokens = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", 0)
+        model = portkey_data.get("model", "unknown")
+        
+        # Calculate cost based on token counts and model pricing
+        cost = calculate_cost(model, input_tokens, output_tokens)
 
         return LogEntry(
             id=uuid.uuid4(),
@@ -263,11 +427,11 @@ class LogIngestionService:
             system_prompt=system_prompt if include_prompt else None,
             context=portkey_data.get("context"),
             tool_calls=portkey_data.get("request", {}).get("tools"),
-            model=portkey_data.get("model", "unknown"),
+            model=model,
             provider=portkey_data.get("provider", "unknown"),
-            input_tokens=portkey_data.get("usage", {}).get("prompt_tokens", 0),
-            output_tokens=portkey_data.get("usage", {}).get("completion_tokens", 0),
-            total_tokens=portkey_data.get("usage", {}).get("total_tokens", 0),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
             latency_ms=portkey_data.get("response_time", 0),
             cost_usd=cost,
             status=status,
@@ -350,10 +514,10 @@ class LogIngestionService:
         include_prompt: bool = True,
     ) -> dict[str, Any]:
         """
-        Import specific logs from Portkey by their IDs.
+        Assign specific logs to a project.
         
-        This fetches logs via the export API and stores them in the database.
-        Used when associating existing Portkey logs with a new project.
+        This first tries to update existing logs in the database (from the workspace pool).
+        Only fetches from Portkey if logs are not found locally.
         
         Args:
             project_id: The project ID to associate logs with
@@ -364,14 +528,15 @@ class LogIngestionService:
             Import statistics
         """
         logger.info(
-            "Importing logs by ID",
+            "Assigning logs to project",
             project_id=str(project_id),
             log_count=len(log_ids),
         )
         
         import_stats = {
-            "project_id": project_id,
+            "project_id": str(project_id),
             "requested": len(log_ids),
+            "assigned": 0,
             "imported": 0,
             "skipped": 0,
             "errors": [],
@@ -381,66 +546,108 @@ class LogIngestionService:
             return import_stats
         
         try:
-            # Fetch all logs from Portkey
-            all_logs = await self.portkey.get_logs(hours=168)  # Last 7 days
+            # Step 1: Try to update existing logs in the database (from workspace pool)
+            # These are logs that were fetched via "Refresh from Portkey" in the logs tab
+            from sqlalchemy import update
             
-            # Filter to only the requested log IDs
-            logs_to_import = [
-                log for log in all_logs
-                if log.get("id") in log_ids or log.get("log_id") in log_ids
-            ]
+            # Update logs to assign to this project (allow re-assignment from other projects)
+            update_result = await self.session.execute(
+                update(LogEntry)
+                .where(LogEntry.portkey_log_id.in_(log_ids))
+                .values(project_id=project_id)
+            )
+            assigned_count = update_result.rowcount
+            import_stats["assigned"] = assigned_count
             
             logger.info(
-                "Found logs to import",
-                requested=len(log_ids),
-                found=len(logs_to_import),
+                "Updated existing logs with project_id",
+                assigned=assigned_count,
             )
             
-            # Get existing log IDs to avoid duplicates
-            existing_ids = await self._get_existing_log_ids(
-                project_id,
-                [log.get("id", log.get("log_id", "")) for log in logs_to_import],
+            # Step 1b: Recalculate costs for assigned logs (in case they were stored with cost=0)
+            logs_to_fix = await self.session.execute(
+                select(LogEntry)
+                .where(
+                    LogEntry.portkey_log_id.in_(log_ids),
+                    LogEntry.project_id == project_id,
+                )
             )
+            fixed_cost_count = 0
+            for log in logs_to_fix.scalars().all():
+                # Recalculate cost based on token counts
+                new_cost = calculate_cost(log.model, log.input_tokens or 0, log.output_tokens or 0)
+                if new_cost != log.cost_usd:
+                    log.cost_usd = new_cost
+                    fixed_cost_count += 1
             
-            # Process logs
-            for log_data in logs_to_import:
-                log_id = log_data.get("id") or log_data.get("log_id", "")
+            if fixed_cost_count > 0:
+                logger.info(f"Recalculated costs for {fixed_cost_count} logs")
+            
+            # Step 2: Check which logs are still missing
+            existing_result = await self.session.execute(
+                select(LogEntry.portkey_log_id)
+                .where(LogEntry.portkey_log_id.in_(log_ids))
+            )
+            existing_ids = {row[0] for row in existing_result.all()}
+            missing_ids = set(log_ids) - existing_ids
+            
+            if missing_ids:
+                logger.info(
+                    "Some logs not in database, fetching from Portkey",
+                    missing_count=len(missing_ids),
+                )
                 
-                if log_id in existing_ids:
-                    import_stats["skipped"] += 1
-                    continue
-                
+                # Step 3: Fetch missing logs from Portkey
                 try:
-                    log_entry = self._convert_portkey_export_log(
-                        project_id=project_id,
-                        portkey_data=log_data,
-                        include_prompt=include_prompt,
-                    )
-                    self.session.add(log_entry)
-                    import_stats["imported"] += 1
-                    existing_ids.add(log_id)
+                    all_logs = await self.portkey.get_logs(hours=168)  # Last 7 days
+                    
+                    # Filter to only the missing log IDs
+                    logs_to_import = [
+                        log for log in all_logs
+                        if (log.get("id") in missing_ids or log.get("log_id") in missing_ids)
+                    ]
+                    
+                    for log_data in logs_to_import:
+                        log_id = log_data.get("id") or log_data.get("log_id", "")
+                        
+                        try:
+                            log_entry = self._convert_portkey_export_log(
+                                project_id=project_id,
+                                portkey_data=log_data,
+                                include_prompt=include_prompt,
+                            )
+                            self.session.add(log_entry)
+                            import_stats["imported"] += 1
+                            
+                        except Exception as e:
+                            logger.warning(
+                                "Failed to import log",
+                                log_id=log_id,
+                                error=str(e),
+                            )
+                            import_stats["errors"].append(f"{log_id}: {str(e)}")
+                            import_stats["skipped"] += 1
                     
                 except Exception as e:
                     logger.warning(
-                        "Failed to import log",
-                        log_id=log_id,
+                        "Failed to fetch missing logs from Portkey",
                         error=str(e),
                     )
-                    import_stats["errors"].append(f"{log_id}: {str(e)}")
-                    import_stats["skipped"] += 1
+                    import_stats["skipped"] = len(missing_ids)
             
             await self.session.flush()
             
             logger.info(
-                "Log import completed",
+                "Log assignment completed",
                 project_id=str(project_id),
+                assigned=import_stats["assigned"],
                 imported=import_stats["imported"],
                 skipped=import_stats["skipped"],
             )
             
         except Exception as e:
             logger.error(
-                "Log import failed",
+                "Log assignment failed",
                 project_id=str(project_id),
                 error=str(e),
             )
@@ -468,15 +675,10 @@ class LogIngestionService:
         # Get log ID
         log_id = portkey_data.get("id") or portkey_data.get("log_id") or str(uuid.uuid4())
         
-        # Parse timestamp (handle multiple possible formats)
+        # Parse timestamp using robust parser that handles multiple formats
+        # Portkey export uses JavaScript Date format: "Sat Jan 17 2026 06:20:43 GMT+0000 (...)"
         time_str = portkey_data.get("time_of_generation") or portkey_data.get("created_at")
-        if isinstance(time_str, str):
-            try:
-                timestamp = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-            except ValueError:
-                timestamp = datetime.now(timezone.utc)
-        else:
-            timestamp = datetime.now(timezone.utc)
+        timestamp = parse_portkey_timestamp(time_str)
         
         # Get model and provider (export format uses ai_model, ai_org)
         model = portkey_data.get("ai_model") or portkey_data.get("model") or "unknown"
@@ -503,20 +705,37 @@ class LogIngestionService:
         else:
             status = portkey_data.get("status", "success")
         
-        # Get cost
-        cost = portkey_data.get("cost") or 0.0
+        # Calculate cost based on token counts and model pricing
+        # Note: Portkey's cost values can be unreliable for some models (e.g., Claude Opus)
+        # so we calculate based on known pricing tables
+        cost = calculate_cost(model, int(input_tokens), int(output_tokens))
         
-        # Extract prompt data
+        # Extract prompt data (handle multi-modal content)
         prompt_str = ""
         system_prompt = None
         messages = portkey_data.get("request", {}).get("messages", [])
         
         if messages:
             for msg in messages:
+                content = msg.get("content", "")
+                # Handle multi-modal content (list of content parts)
+                if isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            text_parts.append(part.get("text", ""))
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    content_str = "\n".join(text_parts) if text_parts else str(content)
+                elif isinstance(content, str):
+                    content_str = content
+                else:
+                    content_str = str(content) if content else ""
+                
                 if msg.get("role") == "system":
-                    system_prompt = msg.get("content", "")
+                    system_prompt = content_str
                 elif msg.get("role") == "user":
-                    prompt_str = msg.get("content", "")
+                    prompt_str = content_str
         elif portkey_data.get("prompt"):
             prompt_str = str(portkey_data.get("prompt"))
         

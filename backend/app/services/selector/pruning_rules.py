@@ -27,6 +27,9 @@ class ModelCandidate:
     quality_score: float = 0.0
     sample_size: int = 0
     
+    # Catalog metadata (tier, use_cases, etc.)
+    metadata: dict[str, Any] = None
+    
     # Exclusion tracking
     excluded: bool = False
     exclusion_reasons: list[str] = None
@@ -34,11 +37,28 @@ class ModelCandidate:
     def __post_init__(self):
         if self.exclusion_reasons is None:
             self.exclusion_reasons = []
+        if self.metadata is None:
+            self.metadata = {}
     
     def exclude(self, reason: str) -> None:
         """Mark this candidate as excluded with a reason."""
         self.excluded = True
         self.exclusion_reasons.append(reason)
+    
+    @property
+    def tier(self) -> str | None:
+        """Get model tier from metadata."""
+        return self.metadata.get("tier")
+    
+    @property
+    def use_cases(self) -> list[str] | None:
+        """Get model use cases from metadata."""
+        return self.metadata.get("use_cases")
+    
+    @property
+    def recommended_for(self) -> str | None:
+        """Get recommendation description from metadata."""
+        return self.metadata.get("recommended_for")
 
 
 @dataclass
@@ -110,7 +130,10 @@ class PruningRulesEngine:
         candidates: list[ModelCandidate],
         rules_applied: list[str],
     ) -> list[ModelCandidate]:
-        """Apply latency constraints."""
+        """Apply latency constraints.
+        
+        Catalog models (0 samples) don't have latency data, so they're exempt.
+        """
         if not self.criteria or not self.tolerances:
             return candidates
 
@@ -118,10 +141,14 @@ class PruningRulesEngine:
         max_p95 = self.criteria.max_latency_p95_ms
         absolute_max = self.tolerances.absolute_max_latency_ms
 
-        rules_applied.append(f"latency_rule(max={max_latency}ms, p95_max={max_p95}ms, absolute={absolute_max}ms)")
+        rules_applied.append(f"latency_rule(max={max_latency}ms, p95_max={max_p95}ms, absolute={absolute_max}ms, catalog_exempt=true)")
 
         for candidate in candidates:
             if candidate.excluded:
+                continue
+            
+            # Catalog models (no latency data) are exempt
+            if candidate.sample_size == 0:
                 continue
                 
             # Hard limit: absolute maximum
@@ -147,7 +174,11 @@ class PruningRulesEngine:
         candidates: list[ModelCandidate],
         rules_applied: list[str],
     ) -> list[ModelCandidate]:
-        """Apply cost constraints based on sensitivity."""
+        """Apply cost constraints based on sensitivity.
+        
+        Catalog models (0 samples) use estimated pricing which may not reflect
+        actual usage. We're lenient with them but still exclude extremely expensive models.
+        """
         if not self.criteria or not self.tolerances:
             return candidates
 
@@ -162,15 +193,22 @@ class PruningRulesEngine:
             tolerance = tolerance * 2  # More lenient for low sensitivity
 
         adjusted_max = max_cost * (1 + tolerance)
-        rules_applied.append(f"cost_rule(max=${max_cost:.4f}, sensitivity={sensitivity}, adjusted=${adjusted_max:.4f})")
+        
+        # Catalog models get 10x leeway since their costs are estimates
+        catalog_max = adjusted_max * 10
+        
+        rules_applied.append(f"cost_rule(max=${max_cost:.4f}, sensitivity={sensitivity}, adjusted=${adjusted_max:.4f}, catalog_max=${catalog_max:.4f})")
 
         for candidate in candidates:
             if candidate.excluded:
                 continue
+            
+            # Catalog models (untested) get more leeway since costs are estimates
+            effective_max = catalog_max if candidate.sample_size == 0 else adjusted_max
                 
-            if candidate.avg_cost_per_request > adjusted_max:
+            if candidate.avg_cost_per_request > effective_max:
                 candidate.exclude(
-                    f"Cost (${candidate.avg_cost_per_request:.4f}/req) exceeds max (${adjusted_max:.4f} with {sensitivity} sensitivity)"
+                    f"Cost (${candidate.avg_cost_per_request:.4f}/req) exceeds max (${effective_max:.4f} with {sensitivity} sensitivity)"
                 )
 
         return candidates
@@ -180,17 +218,24 @@ class PruningRulesEngine:
         candidates: list[ModelCandidate],
         rules_applied: list[str],
     ) -> list[ModelCandidate]:
-        """Apply refusal rate constraints."""
+        """Apply refusal rate constraints.
+        
+        Catalog models (0 samples) don't have refusal data, so they're exempt.
+        """
         if not self.criteria or not self.tolerances:
             return candidates
 
         max_refusal = self.criteria.max_refusal_rate
         absolute_max = self.tolerances.absolute_max_refusal_rate
 
-        rules_applied.append(f"refusal_rule(max={max_refusal*100:.1f}%, absolute={absolute_max*100:.1f}%)")
+        rules_applied.append(f"refusal_rule(max={max_refusal*100:.1f}%, absolute={absolute_max*100:.1f}%, catalog_exempt=true)")
 
         for candidate in candidates:
             if candidate.excluded:
+                continue
+            
+            # Catalog models (no refusal data) are exempt
+            if candidate.sample_size == 0:
                 continue
                 
             # Hard limit
@@ -213,13 +258,20 @@ class PruningRulesEngine:
         candidates: list[ModelCandidate],
         rules_applied: list[str],
     ) -> list[ModelCandidate]:
-        """Apply error rate constraints."""
+        """Apply error rate constraints.
+        
+        Catalog models (0 samples) don't have error data, so they're exempt.
+        """
         max_error_rate = 0.05  # 5% max error rate (hardcoded reasonable default)
         
-        rules_applied.append(f"error_rule(max={max_error_rate*100:.1f}%)")
+        rules_applied.append(f"error_rule(max={max_error_rate*100:.1f}%, catalog_exempt=true)")
 
         for candidate in candidates:
             if candidate.excluded:
+                continue
+            
+            # Catalog models (no error data) are exempt
+            if candidate.sample_size == 0:
                 continue
                 
             if candidate.error_rate > max_error_rate:
@@ -234,15 +286,25 @@ class PruningRulesEngine:
         candidates: list[ModelCandidate],
         rules_applied: list[str],
     ) -> list[ModelCandidate]:
-        """Require minimum sample size for reliable metrics."""
+        """Require minimum sample size for reliable metrics.
+        
+        Models with 0 samples are catalog suggestions (untested models) - 
+        we keep them as candidates since they're recommendations to try.
+        Models with some data but insufficient samples are excluded.
+        """
         min_samples = 10  # Need at least 10 samples for statistical significance
         
-        rules_applied.append(f"sample_size_rule(min={min_samples})")
+        rules_applied.append(f"sample_size_rule(min={min_samples}, catalog_exempt=true)")
 
         for candidate in candidates:
             if candidate.excluded:
                 continue
+            
+            # Catalog models (0 samples) are exempt - they're suggestions to try
+            if candidate.sample_size == 0:
+                continue
                 
+            # Models with some data but not enough are excluded
             if candidate.sample_size < min_samples:
                 candidate.exclude(
                     f"Insufficient data ({candidate.sample_size} samples < {min_samples} minimum)"

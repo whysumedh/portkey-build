@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.database import get_db_context
 from app.core.logging import get_logger
 from app.models.project import Project
-from app.models.evaluation import EvaluationRun, EvaluationStatus
+from app.models.evaluation import EvaluationRun, EvaluationStatus, AggregatedMetrics
 
 logger = get_logger(__name__)
 
@@ -273,7 +273,13 @@ class EvaluationScheduler:
         sample_size: int | None = None,
     ) -> uuid.UUID:
         """
-        Trigger an ad-hoc evaluation.
+        Trigger an ad-hoc evaluation with full replay pipeline.
+        
+        This will:
+        1. Select candidate models (if not provided)
+        2. Sample logs from the project
+        3. Create an evaluation run
+        4. Start replay evaluation in the background
         
         Args:
             project_id: Project to evaluate
@@ -283,40 +289,221 @@ class EvaluationScheduler:
         Returns:
             ID of the created evaluation run
         """
+        import asyncio
+        from app.services.selector.model_selector import ModelSelector
+        from app.models.log_entry import LogEntry
+        from sqlalchemy.orm import selectinload
+        from sqlalchemy import func
+        
+        actual_sample_size = sample_size or settings.default_replay_sample_size
+        
         async with get_db_context() as session:
-            # Load project
+            # Load project with relations
             result = await session.execute(
-                select(Project).where(Project.id == project_id)
+                select(Project)
+                .options(
+                    selectinload(Project.success_criteria),
+                    selectinload(Project.tolerance_levels),
+                )
+                .where(Project.id == project_id)
             )
             project = result.scalar_one_or_none()
             
             if not project:
                 raise ValueError(f"Project {project_id} not found")
             
-            # Get candidates if not specified
+            # Run model selection if no candidates provided
             if not candidate_models:
-                from app.services.selector.model_selector import ModelSelector
                 selector = ModelSelector(session)
                 selection = await selector.select_models(project)
                 candidate_models = [
                     f"{m.provider}/{m.model}" for m in selection.selected_models
                 ]
             
+            # ALWAYS ensure at least 3 models for comparison (using OpenAI models)
+            # This is critical for meaningful evaluations
+            default_openai_models = [
+                "openai/@openai/gpt-4o",
+                "openai/@openai/gpt-4o-mini", 
+                "openai/@openai/o3-mini",
+            ]
+            
+            # Add default models if we don't have enough
+            seen_models = set(candidate_models)
+            for model in default_openai_models:
+                if len(candidate_models) >= 3:
+                    break
+                if model not in seen_models:
+                    candidate_models.append(model)
+                    seen_models.add(model)
+            
+            if not candidate_models:
+                raise ValueError("No candidate models selected - all models were excluded by pruning rules")
+            
+            logger.info(f"Using {len(candidate_models)} candidate models: {candidate_models}")
+            
+            # Sample logs from the project for replay
+            log_result = await session.execute(
+                select(LogEntry.id)
+                .where(LogEntry.project_id == project_id)
+                .where(LogEntry.status == "success")  # Only replay successful logs
+                .order_by(func.random())
+                .limit(actual_sample_size)
+            )
+            log_ids = [row[0] for row in log_result.fetchall()]
+            
+            if not log_ids:
+                raise ValueError(f"No logs found for project {project_id}")
+            
+            # Convert candidate model strings to dict format
+            models = []
+            for cm in candidate_models:
+                if "/" in cm:
+                    provider, model = cm.split("/", 1)
+                    models.append({"provider": provider, "model": model})
+            
             # Create evaluation run
             evaluation_run = EvaluationRun(
                 project_id=project.id,
                 trigger_type="ad_hoc",
-                sample_size=sample_size or settings.default_replay_sample_size,
+                sample_size=len(log_ids),
                 candidate_models=candidate_models,
                 logs_start_date=datetime.now(timezone.utc) - timedelta(days=30),
                 logs_end_date=datetime.now(timezone.utc),
                 status=EvaluationStatus.PENDING.value,
+                replays_total=len(log_ids) * len(models),
             )
             session.add(evaluation_run)
             await session.commit()
             
-            logger.info(f"Ad-hoc evaluation triggered: {evaluation_run.id}")
-            return evaluation_run.id
+            evaluation_run_id = evaluation_run.id
+            logger.info(
+                f"Ad-hoc evaluation run created: {evaluation_run_id}",
+                log_count=len(log_ids),
+                model_count=len(models),
+            )
+        
+        # Start replay evaluation in background task
+        asyncio.create_task(
+            self._run_replay_background(evaluation_run_id, log_ids, models)
+        )
+        
+        return evaluation_run_id
+    
+    async def _run_replay_background(
+        self,
+        evaluation_run_id: uuid.UUID,
+        log_ids: list[uuid.UUID],
+        models: list[dict[str, str]],
+    ):
+        """Background task to run the replay evaluation pipeline."""
+        from app.services.replay.replay_engine import ReplayEngine
+        from app.services.evaluation.orchestrator import EvaluationOrchestrator
+        from app.services.recommendation.recommender import RecommendationEngine
+        
+        logger.info(f"Background replay evaluation started: {evaluation_run_id}")
+        
+        try:
+            async with get_db_context() as session:
+                # Get evaluation run
+                result = await session.execute(
+                    select(EvaluationRun).where(EvaluationRun.id == evaluation_run_id)
+                )
+                evaluation_run = result.scalar_one_or_none()
+                
+                if not evaluation_run:
+                    logger.error(f"Evaluation run {evaluation_run_id} not found")
+                    return
+                
+                # Run replay engine
+                replay_engine = ReplayEngine(session)
+                orchestrator = EvaluationOrchestrator(session)
+                recommender = RecommendationEngine(session)
+                
+                try:
+                    # Run replays - this updates status to RUNNING internally
+                    replay_results = await replay_engine.execute_replay_run(
+                        evaluation_run=evaluation_run,
+                        sample_log_ids=log_ids,
+                        models=models,
+                    )
+                    
+                    logger.info(
+                        f"Replays completed: {evaluation_run_id}",
+                        replays_completed=evaluation_run.replays_completed,
+                    )
+                    
+                    # Run judge evaluations for all replay runs
+                    eval_summary = await orchestrator.evaluate_full_run(evaluation_run_id)
+                    
+                    logger.info(
+                        f"Judgments completed: {evaluation_run_id}",
+                        recommended_model=eval_summary.recommended_model,
+                    )
+                    
+                    # Populate aggregated metrics from replay summaries BEFORE recommendation
+                    # This allows the recommendation engine to use the replay data
+                    for model_summary in eval_summary.model_summaries:
+                        if model_summary.total_evaluated > 0:
+                            agg_metrics = AggregatedMetrics(
+                                project_id=evaluation_run.project_id,
+                                model=model_summary.model,
+                                provider=model_summary.provider,
+                                time_window="7d",
+                                window_start=datetime.now(timezone.utc) - timedelta(days=7),
+                                window_end=datetime.now(timezone.utc),
+                                total_requests=model_summary.total_evaluated,
+                                successful_requests=model_summary.total_evaluated - model_summary.comparison_verdicts.get("worse", 0),
+                                failed_requests=0,
+                                refusals=0,
+                                avg_latency_ms=model_summary.avg_latency_ms,
+                                p50_latency_ms=model_summary.avg_latency_ms,
+                                p95_latency_ms=model_summary.p95_latency_ms,
+                                p99_latency_ms=model_summary.p95_latency_ms * 1.1,
+                                latency_std_dev=0.0,
+                                total_cost_usd=model_summary.total_cost_usd,
+                                avg_cost_per_request=model_summary.total_cost_usd / model_summary.total_evaluated if model_summary.total_evaluated > 0 else 0,
+                                total_input_tokens=0,
+                                total_output_tokens=0,
+                                avg_quality_score=model_summary.avg_overall_score,
+                                avg_correctness_score=model_summary.avg_scores_by_judge.get("comparison", model_summary.avg_overall_score),
+                                avg_helpfulness_score=model_summary.avg_scores_by_judge.get("helpfulness", model_summary.avg_overall_score),
+                                avg_safety_score=1.0,
+                                success_rate=1.0 - (model_summary.comparison_verdicts.get("worse", 0) / model_summary.total_evaluated) if model_summary.total_evaluated > 0 else 1.0,
+                                refusal_rate=0.0,
+                                error_rate=0.0,
+                                quality_variance=model_summary.disagreement_rate,
+                                judge_disagreement_rate=model_summary.disagreement_rate,
+                                drift_detected=False,
+                            )
+                            session.add(agg_metrics)
+                    
+                    # Flush to ensure metrics are available for recommendation
+                    await session.flush()
+                    
+                    # Generate recommendation
+                    await recommender.generate_recommendation(
+                        project_id=evaluation_run.project_id,
+                        evaluation_run_id=evaluation_run_id,
+                    )
+                    
+                    evaluation_run.status = EvaluationStatus.COMPLETED.value
+                    evaluation_run.completed_at = datetime.now(timezone.utc)
+                    
+                    logger.info(
+                        f"Evaluation completed: {evaluation_run_id}",
+                        replays_completed=evaluation_run.replays_completed,
+                    )
+                    
+                except Exception as e:
+                    evaluation_run.status = EvaluationStatus.FAILED.value
+                    evaluation_run.error_message = str(e)
+                    logger.error(f"Evaluation failed: {evaluation_run_id}: {e}", exc_info=True)
+                
+                await session.commit()
+                
+        except Exception as e:
+            logger.error(f"Background replay task failed: {evaluation_run_id}: {e}", exc_info=True)
 
     def get_scheduled_jobs(self) -> list[dict[str, Any]]:
         """Get list of scheduled jobs."""

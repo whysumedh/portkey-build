@@ -20,7 +20,7 @@ from app.schemas.log_entry import (
     LogSyncResponse,
     LogStatsResponse,
 )
-from app.services.ingestion.log_ingestion import LogIngestionService
+from app.services.ingestion.log_ingestion import LogIngestionService, parse_portkey_timestamp, calculate_cost
 from app.services.ingestion.portkey_client import get_portkey_client, PortkeyClientError
 
 logger = get_logger(__name__)
@@ -79,20 +79,46 @@ class CachedLogsResponse(BaseModel):
     last_synced: datetime | None = None
 
 
+@router.get("/portkey/users")
+async def get_unique_users(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[str]:
+    """
+    Get unique user values from log metadata (_user field).
+    
+    This endpoint scans all logs and extracts unique _user values from metadata.
+    Useful for building user filter dropdowns in the UI.
+    """
+    # Query all logs with metadata
+    query = select(LogEntry.log_metadata).where(LogEntry.log_metadata.isnot(None))
+    result = await db.execute(query)
+    
+    # Extract unique _user values
+    users: set[str] = set()
+    for (metadata,) in result.all():
+        if isinstance(metadata, dict) and "_user" in metadata:
+            user = metadata.get("_user")
+            if user and isinstance(user, str):
+                users.add(user)
+    
+    return sorted(list(users))
+
+
 @router.get("/portkey/logs", response_model=CachedLogsResponse)
 async def get_portkey_logs(
     db: Annotated[AsyncSession, Depends(get_db)],
     workspace_id: str | None = Query(default="2d469afe-6e46-4929-ab71-21de003b711d", description="Portkey workspace ID"),
     refresh: bool = Query(default=False, description="Force refresh from Portkey API"),
     hours: int = Query(default=24, ge=1, le=168, description="Hours of logs to fetch when refreshing (default 24, max 168)"),
-    limit: int = Query(default=100, ge=1, le=1000, description="Maximum logs to return"),
+    limit: int = Query(default=500, ge=1, le=1000, description="Maximum logs to return"),
+    user_filter: str | None = Query(default=None, description="Filter logs by _user metadata field"),
 ) -> CachedLogsResponse:
     """
     Get logs from local cache (database) or refresh from Portkey.
     
-    - By default, returns logs from the local database (fast, no API calls)
+    - By default, returns ALL logs from the local database (fast, no API calls)
     - Pass `refresh=true` to fetch new logs from Portkey and store them
-    - Logs without a project_id are workspace-level logs (log pool)
+    - Shows all logs regardless of project assignment (complete workspace log pool)
     """
     
     # If refresh requested, fetch from Portkey and store in DB
@@ -144,25 +170,30 @@ async def get_portkey_logs(
                 detail=f"Failed to fetch logs from Portkey: {str(e)}",
             )
     
-    # Return logs from database (workspace-level logs without project_id)
-    query = (
-        select(LogEntry)
-        .where(LogEntry.project_id.is_(None))
-        .order_by(LogEntry.timestamp.desc())
-        .limit(limit)
-    )
+    # Return ALL logs from database (Portkey Logs view shows complete workspace log pool)
+    # Logs may or may not be assigned to projects - this view shows everything
+    query = select(LogEntry)
+    count_query = select(func.count(LogEntry.id))
+    
+    # Apply user filter if provided
+    if user_filter:
+        # Filter logs where metadata->>'_user' equals the filter value
+        # Use ->> operator to extract JSON value as text (removes quotes from strings)
+        user_filter_condition = LogEntry.log_metadata.op('->>')('_user') == user_filter
+        query = query.where(user_filter_condition)
+        count_query = count_query.where(user_filter_condition)
+    
+    query = query.order_by(LogEntry.timestamp.desc()).limit(limit)
     result = await db.execute(query)
     db_logs = result.scalars().all()
     
-    # Get total count
-    count_result = await db.execute(
-        select(func.count(LogEntry.id)).where(LogEntry.project_id.is_(None))
-    )
+    # Get total count (filtered if user_filter provided)
+    count_result = await db.execute(count_query)
     total = count_result.scalar() or 0
     
-    # Get last synced time
+    # Get last synced time (most recent ingestion across all logs)
     last_synced_result = await db.execute(
-        select(func.max(LogEntry.ingested_at)).where(LogEntry.project_id.is_(None))
+        select(func.max(LogEntry.ingested_at))
     )
     last_synced = last_synced_result.scalar()
     
@@ -184,15 +215,9 @@ def _convert_portkey_log_to_entry(portkey_data: dict) -> LogEntry:
     
     log_id = portkey_data.get("id") or portkey_data.get("log_id") or str(uuid_module.uuid4())
     
-    # Parse timestamp
+    # Parse timestamp using robust parser that handles Portkey's JavaScript Date format
     time_str = portkey_data.get("time_of_generation") or portkey_data.get("created_at")
-    if isinstance(time_str, str):
-        try:
-            timestamp = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-        except ValueError:
-            timestamp = datetime.now(timezone.utc)
-    else:
-        timestamp = datetime.now(timezone.utc)
+    timestamp = parse_portkey_timestamp(time_str)
     
     # Get model and provider
     model = portkey_data.get("ai_model") or portkey_data.get("model") or "unknown"
@@ -203,9 +228,13 @@ def _convert_portkey_log_to_entry(portkey_data: dict) -> LogEntry:
     output_tokens = portkey_data.get("res_units") or portkey_data.get("usage", {}).get("completion_tokens", 0) or 0
     total_tokens = portkey_data.get("total_units") or portkey_data.get("usage", {}).get("total_tokens", 0) or 0
     
-    # Get latency and cost
+    # Get latency
     latency = portkey_data.get("response_time") or portkey_data.get("latency_ms") or 0
-    cost = portkey_data.get("cost") or 0.0
+    
+    # Calculate cost based on token counts and model pricing
+    # Note: Portkey's cost values can be unreliable/missing for some models
+    # so we calculate based on known pricing tables
+    cost = calculate_cost(model, int(input_tokens), int(output_tokens))
     
     # Determine status
     is_success = portkey_data.get("is_success")
@@ -216,14 +245,32 @@ def _convert_portkey_log_to_entry(portkey_data: dict) -> LogEntry:
     else:
         status_val = portkey_data.get("status", "success")
     
-    # Extract prompt
+    # Extract prompt (handle multi-modal content)
     prompt_str = ""
     messages = portkey_data.get("request", {}).get("messages", [])
     if messages:
         for msg in messages:
             if msg.get("role") == "user":
-                prompt_str = msg.get("content", "")
+                content = msg.get("content", "")
+                # Handle multi-modal content (list of content parts)
+                if isinstance(content, list):
+                    # Extract text parts from multi-modal content
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            text_parts.append(part.get("text", ""))
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    prompt_str = "\n".join(text_parts) if text_parts else str(content)
+                elif isinstance(content, str):
+                    prompt_str = content
+                else:
+                    prompt_str = str(content) if content else ""
                 break
+    
+    # Store full request/response for detailed view
+    request_data = portkey_data.get("request")
+    response_data = portkey_data.get("response")
     
     return LogEntry(
         id=uuid_module.uuid4(),
@@ -232,7 +279,7 @@ def _convert_portkey_log_to_entry(portkey_data: dict) -> LogEntry:
         trace_id=portkey_data.get("trace_id"),
         span_id=portkey_data.get("span_id"),
         timestamp=timestamp,
-        endpoint=portkey_data.get("endpoint", "/chat/completions"),
+        endpoint=portkey_data.get("endpoint") or portkey_data.get("request_url") or "/chat/completions",
         prompt=prompt_str,
         prompt_hash=LogEntry.compute_hash(prompt_str),
         model=model,
@@ -245,6 +292,8 @@ def _convert_portkey_log_to_entry(portkey_data: dict) -> LogEntry:
         status=status_val,
         refusal=bool(portkey_data.get("refusal", False)),
         log_metadata=portkey_data.get("metadata"),
+        request_data=request_data,
+        response_data=response_data,
     )
 
 
@@ -277,6 +326,11 @@ def _log_entry_to_dict(log: LogEntry) -> dict[str, Any]:
         "metadata": log.log_metadata,
         "project_id": str(log.project_id) if log.project_id else None,
         "ingested_at": log.ingested_at.isoformat() if log.ingested_at else None,
+        # Full request/response for detailed view
+        "request": log.request_data,
+        "response": log.response_data,
+        "prompt": log.prompt,
+        "system_prompt": log.system_prompt,
     }
 
 

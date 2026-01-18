@@ -126,24 +126,115 @@ function LogDetailModal({
             </div>
           </div>
 
-          {/* Request */}
-          {log.request && (
+          {/* Messages (Readable View) */}
+          {log.request?.messages && Array.isArray(log.request.messages) && (
             <div>
-              <h3 className="text-sm font-semibold text-slate-300 mb-2">Request</h3>
-              <pre className="bg-slate-950 p-4 rounded-lg overflow-x-auto text-xs text-slate-300 font-mono">
-                {JSON.stringify(log.request, null, 2)}
-              </pre>
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Messages</h3>
+              <div className="space-y-3">
+                {(log.request.messages as Array<{role: string; content: string | Array<{type: string; text?: string}>}>).map((msg, idx) => {
+                  // Handle multi-modal content (content can be string or array)
+                  let contentText: string
+                  if (typeof msg.content === 'string') {
+                    contentText = msg.content
+                  } else if (Array.isArray(msg.content)) {
+                    // Extract text from multi-modal content parts
+                    contentText = msg.content
+                      .filter((part): part is {type: string; text: string} => part.type === 'text' && typeof part.text === 'string')
+                      .map(part => part.text)
+                      .join('\n') || JSON.stringify(msg.content)
+                  } else {
+                    contentText = msg.content ? String(msg.content) : ''
+                  }
+                  
+                  return (
+                    <div key={idx} className={`p-3 rounded-lg ${
+                      msg.role === 'system' ? 'bg-amber-900/30 border border-amber-700/50' :
+                      msg.role === 'user' ? 'bg-blue-900/30 border border-blue-700/50' :
+                      msg.role === 'assistant' ? 'bg-emerald-900/30 border border-emerald-700/50' :
+                      'bg-slate-800'
+                    }`}>
+                      <p className={`text-xs uppercase tracking-wider mb-1 font-semibold ${
+                        msg.role === 'system' ? 'text-amber-400' :
+                        msg.role === 'user' ? 'text-blue-400' :
+                        msg.role === 'assistant' ? 'text-emerald-400' :
+                        'text-slate-400'
+                      }`}>{msg.role}</p>
+                      <p className="text-slate-200 text-sm whitespace-pre-wrap">{contentText}</p>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )}
 
-          {/* Response */}
-          {log.response && (
+          {/* Response Content (Readable View) */}
+          {log.response?.choices && Array.isArray(log.response.choices) && (
             <div>
               <h3 className="text-sm font-semibold text-slate-300 mb-2">Response</h3>
-              <pre className="bg-slate-950 p-4 rounded-lg overflow-x-auto text-xs text-slate-300 font-mono">
+              <div className="space-y-3">
+                {(log.response.choices as Array<{message?: {role: string; content: string | Array<{type: string; text?: string}>}; text?: string}>).map((choice, idx) => {
+                  // Handle multi-modal content in response
+                  let contentText: string
+                  const content = choice.message?.content
+                  if (typeof content === 'string') {
+                    contentText = content
+                  } else if (Array.isArray(content)) {
+                    contentText = content
+                      .filter((part): part is {type: string; text: string} => part.type === 'text' && typeof part.text === 'string')
+                      .map(part => part.text)
+                      .join('\n') || JSON.stringify(content)
+                  } else {
+                    contentText = choice.text || (content ? String(content) : '-')
+                  }
+                  
+                  return (
+                    <div key={idx} className="p-3 rounded-lg bg-emerald-900/30 border border-emerald-700/50">
+                      <p className="text-xs uppercase tracking-wider mb-1 font-semibold text-emerald-400">
+                        {choice.message?.role || 'assistant'}
+                      </p>
+                      <p className="text-slate-200 text-sm whitespace-pre-wrap">
+                        {contentText}
+                      </p>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Fallback: Simple prompt display if no request data */}
+          {!log.request?.messages && log.prompt && (
+            <div>
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Prompt</h3>
+              <div className="p-3 rounded-lg bg-blue-900/30 border border-blue-700/50">
+                <p className="text-xs uppercase tracking-wider mb-1 font-semibold text-blue-400">user</p>
+                <p className="text-slate-200 text-sm whitespace-pre-wrap">{log.prompt}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Raw Request JSON (collapsed by default) */}
+          {log.request && (
+            <details className="group">
+              <summary className="text-sm font-semibold text-slate-400 cursor-pointer hover:text-slate-200 transition-colors">
+                Raw Request JSON ▶
+              </summary>
+              <pre className="mt-2 bg-slate-950 p-4 rounded-lg overflow-x-auto text-xs text-slate-300 font-mono max-h-64 overflow-y-auto">
+                {JSON.stringify(log.request, null, 2)}
+              </pre>
+            </details>
+          )}
+
+          {/* Raw Response JSON (collapsed by default) */}
+          {log.response && (
+            <details className="group">
+              <summary className="text-sm font-semibold text-slate-400 cursor-pointer hover:text-slate-200 transition-colors">
+                Raw Response JSON ▶
+              </summary>
+              <pre className="mt-2 bg-slate-950 p-4 rounded-lg overflow-x-auto text-xs text-slate-300 font-mono max-h-64 overflow-y-auto">
                 {JSON.stringify(log.response, null, 2)}
               </pre>
-            </div>
+            </details>
           )}
 
           {/* Metadata */}
@@ -167,11 +258,29 @@ export default function PortkeyLogs() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hours, setHours] = useState(168) // 7 days for refresh
-  const [limit, setLimit] = useState(100)
+  const [limit, setLimit] = useState(500)
   const [selectedLog, setSelectedLog] = useState<PortkeyLog | null>(null)
   const [workspaceId, setWorkspaceId] = useState('2d469afe-6e46-4929-ab71-21de003b711d')
   const [fromCache, setFromCache] = useState(false)
   const [lastSynced, setLastSynced] = useState<string | undefined>()
+  
+  // User filter state
+  const [users, setUsers] = useState<string[]>([])
+  const [selectedUser, setSelectedUser] = useState<string>('')
+  const [usersLoading, setUsersLoading] = useState(false)
+
+  // Load available users for filter
+  const loadUsers = useCallback(async () => {
+    setUsersLoading(true)
+    try {
+      const userList = await portkeyLogsApi.getUsers()
+      setUsers(userList)
+    } catch (err) {
+      console.error('Failed to load users:', err)
+    } finally {
+      setUsersLoading(false)
+    }
+  }, [])
 
   // Load logs from cache (database)
   const loadFromCache = useCallback(async () => {
@@ -183,6 +292,7 @@ export default function PortkeyLogs() {
         workspace_id: workspaceId || undefined,
         limit,
         refresh: false, // Load from cache only
+        user_filter: selectedUser || undefined,
       })
       setLogs(response.logs)
       setFromCache(response.from_cache)
@@ -193,7 +303,7 @@ export default function PortkeyLogs() {
     } finally {
       setLoading(false)
     }
-  }, [limit, workspaceId])
+  }, [limit, workspaceId, selectedUser])
 
   // Refresh logs from Portkey API
   const refreshFromPortkey = useCallback(async () => {
@@ -206,22 +316,31 @@ export default function PortkeyLogs() {
         hours,
         limit,
         refresh: true, // Fetch new logs from Portkey
+        user_filter: selectedUser || undefined,
       })
       setLogs(response.logs)
       setFromCache(response.from_cache)
       setLastSynced(response.last_synced)
+      // Reload users list in case new users came in
+      loadUsers()
     } catch (err) {
       console.error('Failed to refresh logs:', err)
       setError(err instanceof Error ? err.message : 'Failed to fetch logs from Portkey')
     } finally {
       setRefreshing(false)
     }
-  }, [hours, limit, workspaceId])
+  }, [hours, limit, workspaceId, selectedUser, loadUsers])
 
-  // Auto-load from cache on mount
+  // Auto-load users and logs from cache on mount
   useEffect(() => {
+    loadUsers()
     loadFromCache()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Reload logs when user filter changes
+  useEffect(() => {
+    loadFromCache()
+  }, [selectedUser]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Calculate stats
   const stats = {
@@ -333,6 +452,23 @@ export default function PortkeyLogs() {
               <option value={200}>200</option>
               <option value={500}>500</option>
               <option value={1000}>1000</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-400 mb-1">
+              Filter by User
+            </label>
+            <select
+              value={selectedUser}
+              onChange={(e) => setSelectedUser(e.target.value)}
+              className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-500 min-w-[150px]"
+              disabled={usersLoading}
+            >
+              <option value="">All Users</option>
+              {users.map(user => (
+                <option key={user} value={user}>{user}</option>
+              ))}
             </select>
           </div>
 

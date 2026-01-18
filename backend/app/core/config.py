@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     # Portkey
     portkey_api_key: str = Field(default="")
     portkey_base_url: str = "https://api.portkey.ai"
+    
+    # Model Selector Agent (uses Claude 3.7 Sonnet via Portkey for intelligent model selection)
+    # Uses @provider/model format - no virtual keys needed
+    model_selector_model: str = "@bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+    model_selector_max_candidates: int = 3  # Max candidate models to select
+    
+    # Replay Engine Settings
+    replay_max_concurrent: int = 5  # Max concurrent replay requests
+    replay_timeout_seconds: float = 120.0  # Timeout per replay request
+    replay_temperature: float = 0.0  # Deterministic replay by default
+    
+    # AI Judge Settings (uses @provider/model format)
+    judge_model: str = "@openai/gpt-4o"  # Strong model for quality evaluation
+    judge_max_concurrent: int = 3  # Max concurrent judge evaluations
 
     # Evaluation
     default_replay_sample_size: int = 100

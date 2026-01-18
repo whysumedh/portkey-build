@@ -65,15 +65,19 @@ export const logsApi = {
 // Portkey Direct Logs
 export interface PortkeyLog {
   id: string
+  db_id?: string  // Internal database ID
   trace_id?: string
   request_id?: string
   span_id?: string
   created_at?: string
   time_of_generation?: string
+  ingested_at?: string
   // Model info - Portkey uses ai_org for provider
   ai_model?: string
   ai_org?: string  // This is the provider
   ai_provider?: string  // Alias
+  model?: string  // Alias
+  provider?: string  // Alias
   mode?: string
   config?: string
   prompt_slug?: string
@@ -88,15 +92,21 @@ export interface PortkeyLog {
   cost?: number
   cost_currency?: string
   response_time?: number
+  latency_ms?: number  // Alias
   response_status_code?: number
   request_url?: string
   // Status
   status?: string
   is_success?: boolean
-  // Request/Response bodies
+  refusal?: boolean
+  // Extracted content
+  prompt?: string  // Extracted user message
+  system_prompt?: string  // Extracted system message
+  // Request/Response bodies (full JSON from Portkey)
   request?: Record<string, unknown>
   response?: Record<string, unknown>
   metadata?: Record<string, unknown>
+  project_id?: string
 }
 
 export interface PortkeyLogsResponse {
@@ -112,14 +122,21 @@ export const portkeyLogsApi = {
     hours?: number
     limit?: number
     refresh?: boolean  // Pass true to fetch new logs from Portkey
+    user_filter?: string  // Filter logs by _user metadata field
   }) => {
     const params = new URLSearchParams()
     if (options?.workspace_id) params.set('workspace_id', options.workspace_id)
     if (options?.hours) params.set('hours', String(options.hours))
     if (options?.limit) params.set('limit', String(options.limit))
     if (options?.refresh) params.set('refresh', 'true')
+    if (options?.user_filter) params.set('user_filter', options.user_filter)
     
     const { data } = await api.get<PortkeyLogsResponse>(`/logs/portkey/logs?${params}`)
+    return data
+  },
+  
+  getUsers: async () => {
+    const { data } = await api.get<string[]>('/logs/portkey/users')
     return data
   },
   
@@ -167,7 +184,120 @@ export const analyticsApi = {
   },
 }
 
-// Evaluations
+// Evaluations - Replay-based evaluation pipeline
+export interface AnalysisReport {
+  analysis_id: string
+  project_id: string
+  log_count: number
+  date_range: { start: string | null; end: string | null }
+  token_distribution: Record<string, unknown>
+  latency_metrics: {
+    min_ms: number
+    max_ms: number
+    mean_ms: number
+    std_ms: number
+    p50_ms: number
+    p75_ms: number
+    p90_ms: number
+    p95_ms: number
+    p99_ms: number
+  }
+  cost_breakdown: {
+    total_cost_usd: number
+    avg_cost_per_request: number
+    cost_by_model: Record<string, number>
+    cost_by_provider: Record<string, number>
+    projected_monthly_cost: number
+  }
+  prompt_complexity: Record<string, unknown>
+  error_patterns: {
+    total_requests: number
+    success_rate: number
+    error_rate: number
+    refusal_rate: number
+    timeout_rate: number
+    error_codes: Record<string, number>
+  }
+  model_performance: Array<{
+    model: string
+    provider: string
+    request_count: number
+    avg_latency_ms: number
+    p95_latency_ms: number
+    avg_cost_per_request: number
+    success_rate: number
+    refusal_rate: number
+    avg_input_tokens: number
+    avg_output_tokens: number
+  }>
+  key_insights: string[]
+  criteria_assessment: Record<string, unknown>
+}
+
+export interface CandidateModel {
+  provider: string
+  model: string
+  rank: number
+  reasoning: string
+  expected_cost_per_request: number
+  expected_latency_ms: number
+  strengths: string[]
+  concerns: string[]
+  tier: string | null
+  use_cases: string[]
+  quality_score: number | null
+  speed_score: number | null
+}
+
+export interface ModelSelectionResult {
+  selection_id: string
+  project_id: string
+  candidates: CandidateModel[]
+  selection_reasoning: string
+  key_requirements: string[]
+  confidence: number
+}
+
+export interface ReplayStatus {
+  evaluation_run_id: string
+  status: string
+  progress: { completed: number; total: number }
+  models_status: Array<{
+    provider: string
+    model: string
+    status: string
+    successful?: number
+    failed?: number
+    cost_usd?: number
+  }>
+}
+
+export interface ModelResultSummary {
+  provider: string
+  model: string
+  total_evaluated: number
+  avg_quality_score: number
+  avg_comparison_score: number
+  comparison_verdicts: { better: number; equivalent: number; worse: number; unknown: number }
+  total_cost_usd: number
+  avg_latency_ms: number
+  p95_latency_ms: number
+  quality_distribution: { low: number; medium: number; high: number }
+}
+
+export interface EvaluationResults {
+  evaluation_run_id: string
+  project_id: string
+  status: string
+  completed_at: string | null
+  total_logs_evaluated: number
+  model_results: ModelResultSummary[]
+  recommended_model: string | null
+  recommended_provider: string | null
+  recommendation_reasoning: string
+  recommendation_confidence: number
+}
+
 export const evaluationsApi = {
   list: async (projectId: string, page = 1, pageSize = 20) => {
     const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
@@ -192,6 +322,46 @@ export const evaluationsApi = {
   
   cancel: async (projectId: string, evaluationId: string) => {
     const { data } = await api.post(`/evaluations/${projectId}/${evaluationId}/cancel`)
+    return data
+  },
+  
+  // New replay-based evaluation endpoints
+  analyzeLogs: async (projectId: string, logIds: string[]) => {
+    const { data } = await api.post<AnalysisReport>(`/evaluations/${projectId}/analyze`, {
+      log_ids: logIds,
+    })
+    return data
+  },
+  
+  selectModels: async (projectId: string, logIds?: string[], maxCandidates = 5) => {
+    const { data } = await api.post<ModelSelectionResult>(`/evaluations/${projectId}/select-models`, {
+      log_ids: logIds,
+      max_candidates: maxCandidates,
+    })
+    return data
+  },
+  
+  startReplay: async (
+    projectId: string, 
+    logIds: string[], 
+    candidateModels: Array<{ provider: string; model: string }>,
+    includeCurrentModel = true
+  ) => {
+    const { data } = await api.post<ReplayStatus>(`/evaluations/${projectId}/start-replay`, {
+      log_ids: logIds,
+      candidate_models: candidateModels,
+      include_current_model: includeCurrentModel,
+    })
+    return data
+  },
+  
+  getStatus: async (projectId: string, evaluationId: string) => {
+    const { data } = await api.get<ReplayStatus>(`/evaluations/${projectId}/${evaluationId}/status`)
+    return data
+  },
+  
+  getResults: async (projectId: string, evaluationId: string) => {
+    const { data } = await api.get<EvaluationResults>(`/evaluations/${projectId}/${evaluationId}/results`)
     return data
   },
 }

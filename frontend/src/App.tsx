@@ -7,6 +7,7 @@ import ProjectCreate from './pages/ProjectCreate'
 import Recommendations from './pages/Recommendations'
 import Analytics from './pages/Analytics'
 import PortkeyLogs from './pages/PortkeyLogs'
+import EvaluationResults from './pages/EvaluationResults'
 
 function App() {
   return (
@@ -21,6 +22,7 @@ function App() {
           <Route path="projects/:id" element={<ProjectDetail />} />
           <Route path="projects/:id/recommendations" element={<Recommendations />} />
           <Route path="projects/:id/analytics" element={<Analytics />} />
+          <Route path="projects/:projectId/evaluations/:evaluationId" element={<EvaluationResults />} />
         </Route>
       </Routes>
     </BrowserRouter>

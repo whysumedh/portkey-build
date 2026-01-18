@@ -13,7 +13,7 @@ class SuccessCriteriaCreate(BaseModel):
     min_quality_score: float = Field(default=0.7, ge=0, le=1)
     max_latency_ms: float = Field(default=5000, gt=0)
     max_latency_p95_ms: float = Field(default=10000, gt=0)
-    max_cost_per_request_usd: float = Field(default=0.10, ge=0)
+    max_cost_per_request_usd: float = Field(default=1.00, ge=0)
     max_monthly_cost_usd: float | None = None
     max_refusal_rate: float = Field(default=0.05, ge=0, le=1)
     max_safety_violations: int = Field(default=0, ge=0)
@@ -50,6 +50,56 @@ class ToleranceLevelsResponse(ToleranceLevelsCreate):
     updated_at: datetime
 
 
+class CapabilityExpectationsCreate(BaseModel):
+    """
+    Schema for creating capability expectations.
+    
+    Users specify minimum benchmark scores (0-100) for each capability dimension.
+    These align with LiveBench benchmark categories. Models that don't meet
+    these minimums will be filtered out during model selection.
+    
+    All fields are optional - only specify the capabilities you care about.
+    """
+    reasoning: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench reasoning score (0-100)"
+    )
+    coding: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench coding score (0-100)"
+    )
+    agentic_coding: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench agentic coding score (0-100)"
+    )
+    mathematics: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench mathematics score (0-100)"
+    )
+    data_analysis: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench data analysis score (0-100)"
+    )
+    language: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench language score (0-100)"
+    )
+    instruction_following: float | None = Field(
+        default=None, ge=0, le=100,
+        description="Minimum LiveBench instruction following score (0-100)"
+    )
+
+
+class CapabilityExpectationsResponse(CapabilityExpectationsCreate):
+    """Schema for capability expectations response."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: UUID
+    project_id: UUID
+    created_at: datetime
+    updated_at: datetime
+
+
 class ProjectCreate(BaseModel):
     """Schema for creating a project."""
     name: str = Field(..., min_length=1, max_length=255)
@@ -65,6 +115,10 @@ class ProjectCreate(BaseModel):
     log_filter_metadata: dict[str, str] | None = Field(default=None, description="Metadata key-value pairs for filtering logs")
     success_criteria: SuccessCriteriaCreate | None = None
     tolerance_levels: ToleranceLevelsCreate | None = None
+    capability_expectations: CapabilityExpectationsCreate | None = Field(
+        default=None,
+        description="Minimum LiveBench benchmark scores for model selection"
+    )
 
 
 class ProjectUpdate(BaseModel):
@@ -81,6 +135,7 @@ class ProjectUpdate(BaseModel):
     log_filter_metadata: dict[str, str] | None = None
     success_criteria: SuccessCriteriaCreate | None = None
     tolerance_levels: ToleranceLevelsCreate | None = None
+    capability_expectations: CapabilityExpectationsCreate | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -105,6 +160,7 @@ class ProjectResponse(BaseModel):
     updated_at: datetime
     success_criteria: SuccessCriteriaResponse | None
     tolerance_levels: ToleranceLevelsResponse | None
+    capability_expectations: CapabilityExpectationsResponse | None
 
 
 class ProjectListResponse(BaseModel):

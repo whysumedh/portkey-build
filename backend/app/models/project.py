@@ -45,7 +45,7 @@ class SuccessCriteria(Base):
     max_latency_p95_ms: Mapped[float] = mapped_column(Float, default=10000.0)
 
     # Cost metrics
-    max_cost_per_request_usd: Mapped[float] = mapped_column(Float, default=0.10)
+    max_cost_per_request_usd: Mapped[float] = mapped_column(Float, default=1.00)
     max_monthly_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Safety metrics
@@ -93,6 +93,73 @@ class ToleranceLevels(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class CapabilityExpectations(Base):
+    """
+    LiveBench-aligned capability expectations for model selection.
+    
+    Users specify minimum benchmark scores (0-100) for each capability dimension.
+    Models that don't meet these minimums will be filtered out during selection.
+    
+    Dimensions align with LiveBench benchmarks:
+    - reasoning: Logical reasoning and problem-solving
+    - coding: Code generation, review, and debugging
+    - agentic_coding: Autonomous coding with tool use
+    - mathematics: Mathematical problem-solving
+    - data_analysis: Data interpretation and analysis
+    - language: Language understanding and generation
+    - instruction_following: Following complex instructions
+    """
+
+    __tablename__ = "capability_expectations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, unique=True
+    )
+
+    # LiveBench-aligned dimensions (scores 0-100, minimum expectations)
+    reasoning: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coding: Mapped[float | None] = mapped_column(Float, nullable=True)
+    agentic_coding: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mathematics: Mapped[float | None] = mapped_column(Float, nullable=True)
+    data_analysis: Mapped[float | None] = mapped_column(Float, nullable=True)
+    language: Mapped[float | None] = mapped_column(Float, nullable=True)
+    instruction_following: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    def has_any_expectation(self) -> bool:
+        """Check if any capability expectation is set."""
+        return any([
+            self.reasoning is not None,
+            self.coding is not None,
+            self.agentic_coding is not None,
+            self.mathematics is not None,
+            self.data_analysis is not None,
+            self.language is not None,
+            self.instruction_following is not None,
+        ])
+
+    def to_dict(self) -> dict[str, float | None]:
+        """Convert to dictionary for API responses and prompt building."""
+        return {
+            "reasoning": self.reasoning,
+            "coding": self.coding,
+            "agentic_coding": self.agentic_coding,
+            "mathematics": self.mathematics,
+            "data_analysis": self.data_analysis,
+            "language": self.language,
+            "instruction_following": self.instruction_following,
+        }
 
 
 class Project(Base):
@@ -162,6 +229,13 @@ class Project(Base):
         "ToleranceLevels",
         foreign_keys="ToleranceLevels.project_id",
         primaryjoin="Project.id == ToleranceLevels.project_id",
+        uselist=False,
+        lazy="joined",
+    )
+    capability_expectations: Mapped["CapabilityExpectations | None"] = relationship(
+        "CapabilityExpectations",
+        foreign_keys="CapabilityExpectations.project_id",
+        primaryjoin="Project.id == CapabilityExpectations.project_id",
         uselist=False,
         lazy="joined",
     )

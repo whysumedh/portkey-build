@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.logging import get_logger
-from app.models.project import Project, SuccessCriteria, ToleranceLevels
+from app.models.project import Project, SuccessCriteria, ToleranceLevels, CapabilityExpectations
 from app.schemas.project import (
     ProjectCreate,
     ProjectUpdate,
@@ -76,10 +76,24 @@ async def create_project(
         tolerances = ToleranceLevels(project_id=project.id)
         db.add(tolerances)
     
+    # Create capability expectations if provided (LiveBench minimum scores)
+    if project_data.capability_expectations:
+        expectations = CapabilityExpectations(
+            project_id=project.id,
+            **project_data.capability_expectations.model_dump(),
+        )
+        db.add(expectations)
+    
     await db.commit()
     
     # Import selected logs from Portkey if provided
     import_stats = None
+    logger.info(
+        "Project data received",
+        project_id=str(project.id),
+        selected_log_ids_count=len(project_data.selected_log_ids) if project_data.selected_log_ids else 0,
+        selected_log_ids_sample=project_data.selected_log_ids[:3] if project_data.selected_log_ids else None,
+    )
     if project_data.selected_log_ids:
         logger.info(
             "Importing selected logs",
@@ -107,6 +121,7 @@ async def create_project(
         .options(
             selectinload(Project.success_criteria),
             selectinload(Project.tolerance_levels),
+            selectinload(Project.capability_expectations),
         )
         .where(Project.id == project.id)
     )
@@ -129,6 +144,7 @@ async def list_projects(
     query = select(Project).options(
         selectinload(Project.success_criteria),
         selectinload(Project.tolerance_levels),
+        selectinload(Project.capability_expectations),
     )
     
     if is_active is not None:
@@ -167,6 +183,7 @@ async def get_project(
         .options(
             selectinload(Project.success_criteria),
             selectinload(Project.tolerance_levels),
+            selectinload(Project.capability_expectations),
         )
         .where(Project.id == project_id)
     )
@@ -193,6 +210,7 @@ async def update_project(
         .options(
             selectinload(Project.success_criteria),
             selectinload(Project.tolerance_levels),
+            selectinload(Project.capability_expectations),
         )
         .where(Project.id == project_id)
     )
@@ -226,6 +244,16 @@ async def update_project(
         else:
             tolerances = ToleranceLevels(project_id=project.id, **tolerance_data)
             db.add(tolerances)
+    
+    # Handle capability expectations separately
+    if "capability_expectations" in update_data and update_data["capability_expectations"]:
+        expectations_data = update_data.pop("capability_expectations")
+        if project.capability_expectations:
+            for key, value in expectations_data.items():
+                setattr(project.capability_expectations, key, value)
+        else:
+            expectations = CapabilityExpectations(project_id=project.id, **expectations_data)
+            db.add(expectations)
     
     # Update remaining fields
     for key, value in update_data.items():

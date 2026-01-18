@@ -116,8 +116,7 @@ class BaseJudge(ABC):
         prompt: str,
         completion: str,
         context: dict[str, Any] | None = None,
-        model: str = "gpt-4o-mini",
-        provider: str = "openai",
+        model: str | None = None,  # Uses @provider/model format (e.g., @openai/o4-mini-deep-research)
     ) -> JudgeResult:
         """
         Evaluate a completion using this judge.
@@ -126,8 +125,7 @@ class BaseJudge(ABC):
             prompt: The original user prompt
             completion: The model's completion to evaluate
             context: Additional context
-            model: Model to use for judging
-            provider: Provider for the judge model
+            model: Model to use for judging (in @provider/model format)
             
         Returns:
             JudgeResult with score, confidence, and rationale
@@ -142,12 +140,13 @@ class BaseJudge(ABC):
         ]
 
         try:
+            # The portkey client is expected to have a chat_completion method
+            # Model uses @provider/model format (e.g., @openai/o4-mini-deep-research)
             response = await self.portkey.chat_completion(
                 messages=messages,
                 model=model,
-                provider=provider,
                 temperature=0.0,  # Deterministic
-                max_tokens=1000,
+                max_tokens=2000,
             )
 
             response_text = response.get("choices", [{}])[0].get("message", {}).get("content", "")

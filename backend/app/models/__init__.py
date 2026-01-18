@@ -1,6 +1,6 @@
 """SQLAlchemy models for the application."""
 
-from app.models.project import Project, SuccessCriteria, ToleranceLevels
+from app.models.project import Project, SuccessCriteria, ToleranceLevels, CapabilityExpectations
 from app.models.log_entry import LogEntry
 from app.models.evaluation import (
     EvaluationRun,
@@ -10,11 +10,13 @@ from app.models.evaluation import (
     AggregatedMetrics,
 )
 from app.models.recommendation import Recommendation, CandidateModel
+from app.models.model_catalog import ModelCatalogEntry
 
 __all__ = [
     "Project",
     "SuccessCriteria",
     "ToleranceLevels",
+    "CapabilityExpectations",
     "LogEntry",
     "EvaluationRun",
     "ReplayRun",
@@ -23,4 +25,5 @@ __all__ = [
     "AggregatedMetrics",
     "Recommendation",
     "CandidateModel",
+    "ModelCatalogEntry",
 ]

@@ -28,6 +28,21 @@ export interface ToleranceLevels {
   updated_at: string
 }
 
+// LiveBench-aligned capability expectations
+export interface CapabilityExpectations {
+  id: string
+  project_id: string
+  reasoning?: number | null
+  coding?: number | null
+  agentic_coding?: number | null
+  mathematics?: number | null
+  data_analysis?: number | null
+  language?: number | null
+  instruction_following?: number | null
+  created_at: string
+  updated_at: string
+}
+
 export interface Project {
   id: string
   name: string
@@ -47,6 +62,7 @@ export interface Project {
   updated_at: string
   success_criteria?: SuccessCriteria
   tolerance_levels?: ToleranceLevels
+  capability_expectations?: CapabilityExpectations
 }
 
 // Log types

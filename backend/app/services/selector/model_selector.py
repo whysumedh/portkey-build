@@ -27,7 +27,8 @@ from app.services.selector.pruning_rules import (
     ModelCandidate,
     create_candidate_from_metrics,
 )
-from app.services.ingestion.portkey_client import PortkeyClient, get_portkey_client
+from app.services.catalog.model_catalog_service import ModelCatalogService
+from app.models.model_catalog import ModelCatalogEntry
 
 logger = get_logger(__name__)
 
@@ -67,10 +68,9 @@ class ModelSelector:
     def __init__(
         self,
         session: AsyncSession,
-        portkey_client: PortkeyClient | None = None,
     ):
         self.session = session
-        self.portkey = portkey_client or get_portkey_client()
+        self.catalog_service = ModelCatalogService(session)
 
     async def select_models(
         self,
@@ -138,15 +138,27 @@ class ModelSelector:
             project,
         )
 
-        # Step 5: Select top N
+        # Step 5: Select top N (minimum 3 models always)
+        min_models = max(top_n, 3)  # Always select at least 3 models
         selected = []
-        for scored in scored_candidates[:top_n]:
+        for scored in scored_candidates[:min_models]:
             selected.append(scored.candidate)
 
         # Always include current model if requested
         if include_current and current_model and not current_model.excluded:
             if current_model not in selected:
                 selected.append(current_model)
+        
+        # Ensure we have at least 3 models by adding from catalog if needed
+        if len(selected) < 3:
+            # Add more models from catalog that weren't pruned
+            seen_models = {(c.provider, c.model) for c in selected}
+            for scored in scored_candidates:
+                if (scored.candidate.provider, scored.candidate.model) not in seen_models:
+                    selected.append(scored.candidate)
+                    seen_models.add((scored.candidate.provider, scored.candidate.model))
+                    if len(selected) >= 3:
+                        break
 
         # Build reasoning
         reasoning = self._build_selection_reasoning(
@@ -186,39 +198,136 @@ class ModelSelector:
         )
 
     async def _gather_candidates(self, project: Project) -> list[ModelCandidate]:
-        """Gather candidate models from logs and catalog."""
+        """
+        Gather candidate models from logs and model catalog.
+        
+        Uses project requirements to intelligently filter and prioritize models:
+        - Infers use cases from agent purpose
+        - Considers cost sensitivity for tier selection
+        - Prioritizes models that match the project's needs
+        """
         candidates = []
         seen_models = set()
 
-        # Get models from project logs
+        # Step 1: Get models from project logs (these have real usage data)
         result = await self.session.execute(
             select(LogEntry.model, LogEntry.provider)
             .where(LogEntry.project_id == project.id)
             .distinct()
         )
         
+        log_models = []
         for row in result.all():
-            model_key = f"{row.provider}:{row.model}"
-            if model_key not in seen_models:
-                candidates.append(ModelCandidate(
-                    model=row.model,
-                    provider=row.provider,
-                ))
-                seen_models.add(model_key)
-
-        # Try to get additional models from Portkey catalog
-        try:
-            catalog = await self.portkey.get_model_catalog()
-            for model_info in catalog.get("data", []):
-                model_key = f"{model_info.get('provider')}:{model_info.get('model')}"
+            if row.model and row.provider:
+                model_key = f"{row.provider}:{row.model}"
                 if model_key not in seen_models:
                     candidates.append(ModelCandidate(
-                        model=model_info.get("model", ""),
-                        provider=model_info.get("provider", ""),
+                        model=row.model,
+                        provider=row.provider,
                     ))
                     seen_models.add(model_key)
-        except Exception as e:
-            logger.warning(f"Could not fetch model catalog: {e}")
+                    log_models.append(f"{row.provider}/{row.model}")
+        
+        logger.info(
+            "Found models in project logs",
+            model_count=len(log_models),
+            models=log_models,
+        )
+
+        # Step 2: Infer project requirements for intelligent catalog selection
+        # Infer use cases from agent purpose
+        # Convert SQLAlchemy model to dict for inference
+        success_criteria_dict = None
+        if project.success_criteria:
+            success_criteria_dict = {
+                "accuracy_target": project.success_criteria.min_accuracy,
+                "latency_target_ms": project.success_criteria.max_latency_ms,
+            }
+        
+        use_cases = self.catalog_service.infer_use_cases_from_project(
+            agent_purpose=project.agent_purpose,
+            success_criteria=success_criteria_dict,
+        )
+        
+        # Get preferred tiers based on cost sensitivity
+        cost_sensitivity = "medium"
+        if project.tolerance_levels:
+            cost_sensitivity = project.tolerance_levels.cost_sensitivity or "medium"
+        
+        preferred_tiers = self.catalog_service.get_tier_recommendations(cost_sensitivity)
+        
+        # Get minimum scores based on success criteria
+        min_quality_score = None
+        min_speed_score = None
+        if project.success_criteria:
+            if project.success_criteria.min_accuracy and project.success_criteria.min_accuracy > 0.9:
+                min_quality_score = 7  # Require good quality for high accuracy targets
+            if project.success_criteria.max_latency_ms and project.success_criteria.max_latency_ms < 3000:
+                min_speed_score = 7  # Require good speed for low latency targets
+        
+        logger.info(
+            "Inferred project requirements",
+            use_cases=use_cases,
+            preferred_tiers=preferred_tiers,
+            cost_sensitivity=cost_sensitivity,
+            min_quality=min_quality_score,
+            min_speed=min_speed_score,
+        )
+
+        # Step 3: Add candidates from the model catalog based on inferred requirements
+        catalog_models = await self.catalog_service.get_models_for_recommendation(
+            current_provider=project.current_provider,
+            current_model=project.current_model,
+            use_cases=use_cases,
+            preferred_tiers=preferred_tiers,
+            min_quality_score=min_quality_score,
+            min_speed_score=min_speed_score,
+        )
+        
+        catalog_added = []
+        for catalog_entry in catalog_models:
+            model_key = f"{catalog_entry.provider}:{catalog_entry.model}"
+            if model_key not in seen_models:
+                # Create candidate with full catalog info
+                candidate = ModelCandidate(
+                    model=catalog_entry.model,
+                    provider=catalog_entry.provider,
+                )
+                
+                # Set estimated cost from catalog pricing
+                if catalog_entry.input_price_per_token > 0:
+                    # Estimate avg cost assuming 1000 input + 500 output tokens
+                    estimated_cost = (
+                        (1000 * catalog_entry.input_price_per_token / 100) +
+                        (500 * catalog_entry.output_price_per_token / 100)
+                    )
+                    candidate.avg_cost_per_request = estimated_cost
+                
+                # Set quality score from catalog
+                if catalog_entry.quality_score:
+                    candidate.quality_score = catalog_entry.quality_score / 10.0  # Normalize to 0-1
+                
+                # Store tier and use case info for explanation
+                candidate.metadata = {
+                    "tier": catalog_entry.tier,
+                    "use_cases": catalog_entry.use_cases,
+                    "recommended_for": catalog_entry.recommended_for,
+                    "quality_score": catalog_entry.quality_score,
+                    "speed_score": catalog_entry.speed_score,
+                }
+                
+                candidates.append(candidate)
+                seen_models.add(model_key)
+                
+                tier_info = f" ({catalog_entry.tier})" if catalog_entry.tier else ""
+                catalog_added.append(f"{catalog_entry.provider}/{catalog_entry.model}{tier_info}")
+        
+        logger.info(
+            "Added models from catalog based on project requirements",
+            catalog_count=len(catalog_added),
+            total_candidates=len(candidates),
+            models_added=catalog_added[:10],  # Log first 10
+        )
 
         return candidates
 
@@ -317,7 +426,7 @@ class ModelSelector:
         for candidate in candidates:
             # Normalize metrics to 0-1 scale (higher is better)
             latency_score = 1.0 - min(candidate.avg_latency_ms / 10000, 1.0)  # Assume 10s is worst
-            cost_score = 1.0 - min(candidate.avg_cost_per_request / 0.10, 1.0)  # Assume $0.10 is worst
+            cost_score = 1.0 - min(candidate.avg_cost_per_request / 1.00, 1.0)  # Assume $1.00 is worst
             quality_score = candidate.quality_score if candidate.quality_score > 0 else 0.5  # Default to 0.5
             reliability_score = 1.0 - candidate.refusal_rate - candidate.error_rate
             reliability_score = max(0, reliability_score)
@@ -362,25 +471,55 @@ class ModelSelector:
         excluded: list[ModelCandidate],
         scored: list[CandidateScore],
     ) -> str:
-        """Build human-readable selection reasoning."""
+        """Build human-readable selection reasoning with tier and use case info."""
         lines = []
         
         lines.append(f"Selected {len(selected)} candidate models for evaluation.")
         
         if selected:
-            lines.append("\nSelected models:")
+            lines.append("\n📊 Selected models:")
             for i, candidate in enumerate(selected, 1):
                 score = next((s for s in scored if s.candidate == candidate), None)
+                
+                # Build model info line with tier
+                tier_badge = ""
+                if candidate.tier:
+                    tier_icons = {"budget": "💚", "standard": "💙", "premium": "💜", "enterprise": "👑"}
+                    tier_badge = f" [{tier_icons.get(candidate.tier, '')} {candidate.tier.upper()}]"
+                
                 if score:
-                    lines.append(f"  {i}. {candidate.provider}/{candidate.model} (score: {score.overall_score:.3f})")
+                    lines.append(f"  {i}. {candidate.provider}/{candidate.model}{tier_badge} (score: {score.overall_score:.3f})")
                 else:
-                    lines.append(f"  {i}. {candidate.provider}/{candidate.model}")
+                    lines.append(f"  {i}. {candidate.provider}/{candidate.model}{tier_badge}")
+                
+                # Add recommendation reason if available
+                if candidate.recommended_for:
+                    lines.append(f"      → {candidate.recommended_for}")
+                
+                # Show use cases
+                if candidate.use_cases:
+                    lines.append(f"      Use cases: {', '.join(candidate.use_cases)}")
         
+        # Group excluded models by tier
         if excluded:
-            lines.append(f"\nExcluded {len(excluded)} models:")
-            for candidate in excluded[:5]:  # Show top 5 exclusions
-                reasons = ", ".join(candidate.exclusion_reasons[:2])
-                lines.append(f"  - {candidate.provider}/{candidate.model}: {reasons}")
+            lines.append(f"\n❌ Excluded {len(excluded)} models:")
+            
+            # Group by tier for better readability
+            by_tier = {"budget": [], "standard": [], "premium": [], "enterprise": [], "unknown": []}
+            for candidate in excluded:
+                tier = candidate.tier or "unknown"
+                by_tier[tier].append(candidate)
+            
+            shown = 0
+            for tier, tier_candidates in by_tier.items():
+                if tier_candidates and shown < 5:
+                    for candidate in tier_candidates[:2]:
+                        reasons = ", ".join(candidate.exclusion_reasons[:2])
+                        lines.append(f"  - {candidate.provider}/{candidate.model} [{tier}]: {reasons}")
+                        shown += 1
+                        if shown >= 5:
+                            break
+            
             if len(excluded) > 5:
                 lines.append(f"  ... and {len(excluded) - 5} more")
         

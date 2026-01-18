@@ -30,15 +30,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize database
     await init_db()
     
-    # Start scheduler
-    from app.services.scheduler.scheduler import get_scheduler
-    scheduler = get_scheduler()
-    scheduler.start()
+    # TODO: Re-enable scheduler when ready for production
+    # # Start scheduler
+    # from app.services.scheduler.scheduler import get_scheduler
+    # scheduler = get_scheduler()
+    # scheduler.start()
     
     yield
     
     # Cleanup
-    scheduler.stop()
+    # scheduler.stop()  # Commented out - scheduler disabled
     await close_db()
     logger.info("Application shutdown complete")
 

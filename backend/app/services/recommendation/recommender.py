@@ -69,7 +69,8 @@ class RecommendationEngine:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.explainability = ExplainabilityEngine(session)
-        self._confidence_threshold = settings.confidence_threshold
+        # Lower threshold to allow recommendations with limited data
+        self._confidence_threshold = 0.2  # Was settings.confidence_threshold (0.7)
 
     async def generate_recommendation(
         self,
@@ -202,14 +203,14 @@ class RecommendationEngine:
         ranked = []
         
         for m in metrics:
-            # Skip if insufficient data
-            if m.total_requests < 10:
+            # Skip if insufficient data (allow small samples for testing)
+            if m.total_requests < 3:
                 continue
             
             # Calculate component scores (0-1, higher is better)
             quality_score = (m.avg_quality_score or 0.5)
             latency_score = 1.0 - min((m.avg_latency_ms or 0) / 10000, 1.0)
-            cost_score = 1.0 - min((m.avg_cost_per_request or 0) / 0.10, 1.0)
+            cost_score = 1.0 - min((m.avg_cost_per_request or 0) / 1.00, 1.0)
             reliability_score = m.success_rate * (1 - m.refusal_rate)
             
             breakdown = {
